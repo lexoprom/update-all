@@ -9,6 +9,27 @@ FORCE_RUN=false
 SCRIPT_NAME="$(basename "$0")"
 LOCK_FILE="/tmp/.${SCRIPT_NAME}_lock"
 REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
+SKIP_COMMANDS=false
+COMMANDS_FILE=""
+
+resolve_script_path() {
+    local path="$1"
+    if [[ "$path" != /* && "$path" != *"/"* ]]; then
+        path="$(command -v "$path" 2>/dev/null || echo "$path")"
+    fi
+    while [[ -L "$path" ]]; do
+        local dir target
+        dir="$(cd -P "$(dirname "$path")" && pwd)"
+        target="$(readlink "$path")"
+        [[ "$target" != /* ]] && target="$dir/$target"
+        path="$target"
+    done
+    echo "$path"
+}
+
+SCRIPT_PATH="$(resolve_script_path "${BASH_SOURCE[0]:-$0}")"
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+COMMANDS_FILE="$SCRIPT_DIR/update-all.commands"
 
 if [[ ! -d "$REPORT_DIR" ]]; then
     echo "Failed to create report directory. Exiting." >&2
@@ -44,6 +65,11 @@ trap cleanup EXIT INT TERM
 
 # Utility functions
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+commands_file_has_entries() {
+    local file="$1"
+    [[ -f "$file" ]] && grep -Eq '^[[:space:]]*[^#[:space:]]' "$file"
+}
 
 print_header() {
     echo -e "\n${YELLOW}=======================================================${NC}"
@@ -149,6 +175,46 @@ update_homebrew() {
 update_mise_tools() {
     safe_execute "mise tool upgrades" mise upgrade --yes
     safe_execute "mise reshim" mise reshim
+}
+
+update_custom_commands() {
+    local file="$COMMANDS_FILE"
+
+    if [[ "$SKIP_COMMANDS" = true ]]; then
+        log_status "custom commands" "⏭️ Skipped"
+        return
+    fi
+
+    if ! commands_file_has_entries "$file"; then
+        log_status "custom commands" "⏭️ No commands file"
+        return
+    fi
+
+    local idxfile="$REPORT_DIR/commands.index"
+    : > "$idxfile"
+
+    local i=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        [[ "$line" == \#* ]] && continue
+
+        i=$((i + 1))
+        local label
+        label="command $(printf '%02d' "$i")"
+        printf '%s\t%s\n' "$label" "$line" >> "$idxfile"
+
+        if [[ "$DRY_RUN" = true ]]; then
+            echo -e "${CYAN}[DRY RUN] Would execute: $line${NC}"
+            log_status "$label" "🔍 Dry run"
+            continue
+        fi
+
+        safe_execute "$label" bash -lc "$line"
+    done < "$file"
+
+    log_status "custom commands" "✅ Completed ($i)"
 }
 
 update_global_packages() {
@@ -308,12 +374,23 @@ generate_summary() {
     echo -e "\n${YELLOW}=======================================================${NC}"
     echo -e "${GREEN}Update Summary Report${NC}"
     echo -e "${YELLOW}=======================================================${NC}\n"
-    local ordered=("Homebrew update" "Homebrew upgrade" "Homebrew cleanup" "mise tool upgrades" "mise reshim" "pipx packages" "bun global packages" "macOS Updates")
+    local ordered=("Homebrew update" "Homebrew upgrade" "Homebrew cleanup" "mise tool upgrades" "mise reshim" "pipx packages" "bun global packages" "macOS Updates" "custom commands")
     for component in "${ordered[@]}"; do
         if [[ -n "${report_status[$component]+_}" ]]; then
             printf "${BLUE}%-45s${NC} %s\n" "$component:" "${report_status[$component]}"
         fi
     done
+
+    if [[ -f "$REPORT_DIR/commands.index" ]]; then
+        echo -e "\n${GREEN}Custom Commands${NC}"
+        while IFS=$'\t' read -r label cmd; do
+            [[ -z "${label:-}" ]] && continue
+            local status="${report_status[$label]:-}"
+            printf "${BLUE}%-45s${NC} %s\n" "$label:" "$status"
+            echo -e "  ${CYAN}$cmd${NC}"
+        done < "$REPORT_DIR/commands.index"
+    fi
+
     echo -e "\n${CYAN}Completed on: $(date)${NC}"
 }
 
@@ -328,6 +405,26 @@ main() {
             --dry-run) DRY_RUN=true ;;
             --verbose) VERBOSE=true ;;
             --force) FORCE_RUN=true ;;
+            --commands-file)
+                shift
+                [[ $# -gt 0 ]] || { echo "--commands-file requires a path" >&2; exit 1; }
+                COMMANDS_FILE="$1"
+                ;;
+            --skip-commands) SKIP_COMMANDS=true ;;
+            --help|-h)
+                cat <<EOF
+Usage: $SCRIPT_NAME [options]
+
+Options:
+  --dry-run            Print commands without executing
+  --verbose            Print commands as they run
+  --force              Force run even if lock exists
+  --commands-file PATH Use a custom commands file (default: $SCRIPT_DIR/update-all.commands)
+  --skip-commands       Disable running custom commands
+  --help, -h           Show this help
+EOF
+                exit 0
+                ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
         shift
@@ -345,6 +442,7 @@ main() {
     command_exists softwareupdate && ((total_steps++))
     command_exists mise && ((total_steps++))
     ((total_steps++)) # Global packages (Always run if dependencies exist)
+    [[ "$SKIP_COMMANDS" = false ]] && commands_file_has_entries "$COMMANDS_FILE" && ((total_steps++))
 
     # 2. PHASE 1: System & Runtimes
     local phase1_jobs=()
@@ -374,6 +472,17 @@ main() {
     if [[ ${#phase2_jobs[@]} -gt 0 ]]; then
         echo -e "${BLUE}...Waiting for Package updates to finish...${NC}"
         wait "${phase2_jobs[@]}"
+    fi
+
+    if [[ "$SKIP_COMMANDS" = false ]] && commands_file_has_entries "$COMMANDS_FILE"; then
+        show_progress "Running custom commands"
+        update_custom_commands
+    else
+        if [[ "$SKIP_COMMANDS" = true ]]; then
+            log_status "custom commands" "⏭️ Skipped"
+        else
+            log_status "custom commands" "⏭️ No commands file"
+        fi
     fi
 
     generate_summary
