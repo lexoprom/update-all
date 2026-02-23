@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+# Simplified Universal System & Tool Updater - macOS Bash Version (Final Robust)
+set -euo pipefail
+
+# Configuration
+DRY_RUN=false
+VERBOSE=false
+FORCE_RUN=false
+SCRIPT_NAME="$(basename "$0")"
+LOCK_FILE="/tmp/.${SCRIPT_NAME}_lock"
+REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
+
+if [[ ! -d "$REPORT_DIR" ]]; then
+    echo "Failed to create report directory. Exiting." >&2
+    exit 1
+fi
+
+# Colors
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[0;33m'
+readonly BLUE='\033[0;34m'
+readonly RED='\033[0;31m'
+readonly CYAN='\033[0;36m'
+readonly NC='\033[0m'
+
+# Status tracking
+declare -A report_status=()
+current_step=0
+total_steps=0
+
+# Cleanup on exit
+cleanup() {
+    local exit_code=$?
+    [[ -f "$LOCK_FILE" ]] && rm -f "$LOCK_FILE"
+    if [[ -n "${REPORT_DIR:-}" && -d "$REPORT_DIR" ]]; then
+        rm -rf "$REPORT_DIR"
+    fi
+    if [[ $exit_code -ne 0 && $exit_code -ne 130 ]]; then
+        echo -e "\n${RED}Script aborted (exit code: $exit_code)${NC}"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT INT TERM
+
+# Utility functions
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+print_header() {
+    echo -e "\n${YELLOW}=======================================================${NC}"
+    echo -e "${GREEN}$1${NC}"
+    echo -e "${YELLOW}=======================================================${NC}\n"
+}
+
+show_progress() {
+    current_step=$((current_step + 1))
+    echo -e "${BLUE}[$current_step/$total_steps] $1${NC}"
+}
+
+log_status() {
+    local component="$1"
+    local status="$2"
+    [[ -d "$REPORT_DIR" ]] || return
+    printf '%s\t%s\n' "$component" "$status" >> "$REPORT_DIR/${BASHPID}.log"
+}
+
+# Execute command with proper error handling and reporting
+safe_execute() {
+    local description="$1"
+    shift
+    if [[ "$DRY_RUN" = true ]]; then
+        echo -e "${CYAN}[DRY RUN] Would execute: $*${NC}"
+        log_status "$description" "🔍 Dry run"
+        return 0
+    fi
+
+    [[ "$VERBOSE" = true ]] && echo -e "${CYAN}Executing: $*${NC}"
+
+    local output exit_code
+    local previous_errexit=0
+    [[ $- == *e* ]] && previous_errexit=1
+
+    set +e
+    output=$("$@" 2>&1)
+    exit_code=$?
+    if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_status "$description" "✅ Success"
+        [[ "$VERBOSE" = true ]] && echo -e "${GREEN}✅ $description completed${NC}"
+    else
+        log_status "$description" "❌ Failed (exit code: $exit_code)"
+        echo -e "${RED}❌ $description failed with exit code $exit_code${NC}"
+        local cmd_str="$*"
+        echo -e "${CYAN}Command:${NC} $cmd_str"
+        if [[ -n "$output" ]]; then
+            while IFS= read -r line; do
+                echo "[$cmd_str] $line"
+            done <<< "$output"
+        fi
+    fi
+    return 0
+}
+
+acquire_lock() {
+    if [[ -f "$LOCK_FILE" ]]; then
+        local lock_pid
+        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            if [[ "$FORCE_RUN" = true ]]; then
+                echo -e "${YELLOW}Warning: Forcibly removing existing lock file (PID: $lock_pid)${NC}"
+                rm -f "$LOCK_FILE"
+            else
+                echo -e "${RED}Error: Another instance is already running (PID: $lock_pid)${NC}"
+                exit 1
+            fi
+        else
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    echo "$$" > "$LOCK_FILE"
+}
+
+get_user_input() {
+    local prompt="$1"
+    local timeout="${2:-15}"
+    local default="${3:-n}"
+    echo -e "${BLUE}$prompt (y/n - timeout in ${timeout}s)${NC}"
+    local input
+    if read -r -t "$timeout" input 2>/dev/null; then
+        case "$input" in
+            [Yy]|[Yy][Ee][Ss]) return 0 ;;
+            [Nn]|[Nn][Oo]|"") return 1 ;;
+            *) [[ "$default" = "y" ]] ;;
+        esac
+    else
+        echo -e "\nTimeout reached. Using default: $default"
+        [[ "$default" = "y" ]]
+    fi
+}
+
+# --- UPDATE FUNCTIONS ---
+
+update_homebrew() {
+    safe_execute "Homebrew update" brew update
+    safe_execute "Homebrew upgrade" brew upgrade
+    safe_execute "Homebrew cleanup" brew cleanup
+}
+
+update_mise_tools() {
+    safe_execute "mise tool upgrades" mise upgrade --yes
+    safe_execute "mise reshim" mise reshim
+}
+
+update_global_packages() {
+    local pids=()
+
+    # 1. Update Pipx
+    if command_exists pipx; then
+        if [[ "$DRY_RUN" = false ]]; then
+            (
+                if pipx upgrade-all > "$REPORT_DIR/pipx.log" 2>&1; then
+                    echo 0 > "$REPORT_DIR/pipx_exit"
+                    # Parse pipx output for version changes
+                    # Format: "upgraded package <name> from <old> to <new>"
+                    # or "Package <name> has been upgraded <old> -> <new>"
+                    local updated=0
+                    while IFS= read -r line; do
+                        if [[ "$line" =~ upgraded\ (.+)\ from\ (.+)\ to\ (.+) ]]; then
+                            echo -e "${GREEN}  ↑ ${BASH_REMATCH[1]}: ${BASH_REMATCH[2]} → ${BASH_REMATCH[3]}${NC}"
+                            ((updated++))
+                        elif [[ "$line" =~ (.+)\ upgraded\ (.+)\ -\>\ (.+) ]]; then
+                            echo -e "${GREEN}  ↑ ${BASH_REMATCH[1]}: ${BASH_REMATCH[2]} → ${BASH_REMATCH[3]}${NC}"
+                            ((updated++))
+                        fi
+                    done < "$REPORT_DIR/pipx.log"
+                    if [[ $updated -eq 0 ]]; then
+                        echo "All pipx packages already up to date."
+                    else
+                        echo "Updated $updated pipx package(s)."
+                    fi
+                else
+                    echo -e "${RED}⚠️ Pipx upgrade failed. Details:${NC}"
+                    cat "$REPORT_DIR/pipx.log"
+                    echo 1 > "$REPORT_DIR/pipx_exit"
+                fi
+            ) &
+            pids+=($!)
+        else
+            log_status "pipx packages" "🔍 Dry run"
+        fi
+    else
+        log_status "pipx packages" "⏭️ Not installed"
+    fi
+
+    # 2. Update Bun Global Packages
+    if command_exists bun; then
+        if [[ "$DRY_RUN" = false ]]; then
+            (
+                # Capture current versions (package@version format)
+                declare -A OLD_VERSIONS=()
+                while IFS= read -r line; do
+                    pkg=$(echo "$line" | awk '{print $NF}')
+                    name=$(echo "$pkg" | sed -E 's/@[^@]+$//')
+                    version=$(echo "$pkg" | grep -oE '@[^@]+$' | sed 's/@//')
+                    [[ -n "$name" && -n "$version" ]] && OLD_VERSIONS["$name"]="$version"
+                done < <(bun pm ls -g 2>/dev/null | awk '/^[├└]/')
+
+                PACKAGES="${!OLD_VERSIONS[*]}"
+
+                if [[ -n "$PACKAGES" ]]; then
+                    echo "Updating Bun globals: $PACKAGES"
+
+                    if bun add -g $PACKAGES > "$REPORT_DIR/bun_install.log" 2>&1; then
+                        echo 0 > "$REPORT_DIR/bun_exit"
+
+                        # Capture new versions and compare
+                        declare -A NEW_VERSIONS=()
+                        while IFS= read -r line; do
+                            pkg=$(echo "$line" | awk '{print $NF}')
+                            name=$(echo "$pkg" | sed -E 's/@[^@]+$//')
+                            version=$(echo "$pkg" | grep -oE '@[^@]+$' | sed 's/@//')
+                            [[ -n "$name" && -n "$version" ]] && NEW_VERSIONS["$name"]="$version"
+                        done < <(bun pm ls -g 2>/dev/null | awk '/^[├└]/')
+
+                        # Show version changes
+                        local updated=0
+                        for name in "${!OLD_VERSIONS[@]}"; do
+                            old_ver="${OLD_VERSIONS[$name]}"
+                            new_ver="${NEW_VERSIONS[$name]:-}"
+                            if [[ -n "$new_ver" && "$old_ver" != "$new_ver" ]]; then
+                                echo -e "${GREEN}  ↑ $name: $old_ver → $new_ver${NC}"
+                                ((updated++))
+                            fi
+                        done
+                        if [[ $updated -eq 0 ]]; then
+                            echo "All Bun packages already up to date."
+                        else
+                            echo "Updated $updated Bun package(s)."
+                        fi
+                    else
+                        echo -e "${RED}⚠️ Bun update failed. Details:${NC}"
+                        cat "$REPORT_DIR/bun_install.log"
+                        echo 1 > "$REPORT_DIR/bun_exit"
+                    fi
+                else
+                    echo "No global Bun packages detected."
+                    echo 0 > "$REPORT_DIR/bun_exit"
+                fi
+            ) &
+            pids+=($!)
+        else
+            echo -e "${CYAN}[DRY RUN] Would execute: bun add -g <detected_packages>${NC}"
+            log_status "bun global packages" "🔍 Dry run"
+        fi
+    else
+        log_status "bun global packages" "⏭️ Not installed"
+    fi
+
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        echo "Waiting for package managers..."
+        wait "${pids[@]}"
+
+        command_exists pipx && [[ "$DRY_RUN" = false ]] && {
+            local code=$(cat "$REPORT_DIR/pipx_exit" 2>/dev/null || echo "1")
+            log_status "pipx packages" "$([[ "$code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
+        }
+
+        command_exists bun && [[ "$DRY_RUN" = false ]] && {
+            local code=$(cat "$REPORT_DIR/bun_exit" 2>/dev/null || echo "1")
+            log_status "bun global packages" "$([[ "$code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
+        }
+    fi
+}
+
+
+check_macos_updates() {
+    if [[ "$DRY_RUN" = true ]]; then
+        log_status "macOS Updates" "🔍 Dry run"
+        return
+    fi
+    local updates_output
+    if updates_output=$(softwareupdate -l 2>&1); then
+        if echo "$updates_output" | grep -q "No new software available"; then
+            log_status "macOS Updates" "✅ Up to date"
+        else
+            echo -e "${YELLOW}Available macOS updates:${NC}\n$updates_output"
+            log_status "macOS Updates" "⚠️ Updates available"
+        fi
+    else
+        log_status "macOS Updates" "❌ Check failed"
+    fi
+}
+
+load_report_status() {
+    declare -gA report_status=()
+    shopt -s nullglob
+    for file in "$REPORT_DIR"/*.log; do
+        while IFS=$'\t' read -r component status; do
+            [[ -z "${component// }" ]] && continue
+            report_status["$component"]="$status"
+        done < "$file"
+    done
+    shopt -u nullglob
+}
+
+generate_summary() {
+    load_report_status
+    echo -e "\n${YELLOW}=======================================================${NC}"
+    echo -e "${GREEN}Update Summary Report${NC}"
+    echo -e "${YELLOW}=======================================================${NC}\n"
+    local ordered=("Homebrew update" "Homebrew upgrade" "Homebrew cleanup" "mise tool upgrades" "mise reshim" "pipx packages" "bun global packages" "macOS Updates")
+    for component in "${ordered[@]}"; do
+        if [[ -n "${report_status[$component]+_}" ]]; then
+            printf "${BLUE}%-45s${NC} %s\n" "$component:" "${report_status[$component]}"
+        fi
+    done
+    echo -e "\n${CYAN}Completed on: $(date)${NC}"
+}
+
+# --- MAIN EXECUTION ---
+
+main() {
+    set +e
+    echo -e "${CYAN}Starting Universal System & Tool Updater (Final Robust)...${NC}"
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --dry-run) DRY_RUN=true ;;
+            --verbose) VERBOSE=true ;;
+            --force) FORCE_RUN=true ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+        esac
+        shift
+    done
+
+    # 1. SETUP PHASE
+    acquire_lock
+    cd "$HOME"
+    export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"
+    if command_exists mise; then eval "$(mise activate bash)"; fi
+
+    # Calculate Total Steps Correctly
+    total_steps=0
+    command_exists brew && ((total_steps++))
+    command_exists softwareupdate && ((total_steps++))
+    command_exists mise && ((total_steps++))
+    ((total_steps++)) # Global packages (Always run if dependencies exist)
+
+    # 2. PHASE 1: System & Runtimes
+    local phase1_jobs=()
+    if command_exists brew; then
+        show_progress "Updating Homebrew"
+        (update_homebrew) & phase1_jobs+=($!)
+    fi
+    if command_exists softwareupdate; then
+        show_progress "Checking macOS System Updates"
+        (check_macos_updates) & phase1_jobs+=($!)
+    fi
+    if command_exists mise; then
+        show_progress "Updating mise tools (Runtimes)"
+        (update_mise_tools) & phase1_jobs+=($!)
+    fi
+
+    if [[ ${#phase1_jobs[@]} -gt 0 ]]; then
+        echo -e "${BLUE}...Waiting for System & Runtime updates to finish...${NC}"
+        wait "${phase1_jobs[@]}"
+    fi
+
+    # 3. PHASE 2: Global Packages
+    local phase2_jobs=()
+    show_progress "Updating global packages (Bun, Pipx)"
+    (update_global_packages) & phase2_jobs+=($!)
+
+    if [[ ${#phase2_jobs[@]} -gt 0 ]]; then
+        echo -e "${BLUE}...Waiting for Package updates to finish...${NC}"
+        wait "${phase2_jobs[@]}"
+    fi
+
+    generate_summary
+}
+
+[[ "${DEBUG:-}" == "true" ]] && set -x
+main "$@"
