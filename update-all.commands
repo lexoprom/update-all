@@ -1,5 +1,5 @@
 # Custom commands run after the standard updates.
 # One command per line. Blank lines and lines starting with # are ignored.
 
-cd ~/.codex/superpowers && git pull
-
+if [[ -d "$HOME/.codex/superpowers" || -d "$HOME/.codex/.superpowers.disable" ]]; then cd "$HOME/.codex/superpowers" 2>/dev/null || cd "$HOME/.codex/.superpowers.disable"; git pull; else echo 'Skipping ~/.codex/superpowers: repo not present'; fi
+if [[ -d "$HOME/.agents/skills/pi-skills" || -d "$HOME/.agents/skills/.pi-skills.disable" ]]; then cd "$HOME/.agents/skills/pi-skills" 2>/dev/null || cd "$HOME/.agents/skills/.pi-skills.disable"; git pull; else echo 'Skipping ~/.agents/skills/pi-skills: repo not present'; fi
