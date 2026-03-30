@@ -168,6 +168,33 @@ EOF
   assert_contains "$out" "Skipped"
 }
 
+test_step_count_includes_enabled_custom_commands() {
+  local case_dir="$tmp/step-count-enabled"
+  setup_case "$case_dir"
+  cat > "$case_dir/update-all.commands" <<'EOF'
+echo one
+EOF
+
+  local out
+  out="$(run_case "$case_dir" --dry-run)"
+
+  assert_contains "$out" "[5/5] Running custom commands"
+}
+
+test_step_count_excludes_disabled_custom_commands() {
+  local case_dir="$tmp/step-count-disabled"
+  setup_case "$case_dir"
+  cat > "$case_dir/update-all.commands" <<'EOF'
+echo one
+EOF
+
+  local out
+  out="$(run_case "$case_dir" --dry-run --skip-commands)"
+
+  assert_contains "$out" "[4/4] Updating global packages (Bun, npm, Pipx)"
+  assert_not_contains "$out" "[5/5] Running custom commands"
+}
+
 test_comments_and_blank_lines_ignored() {
   local case_dir="$tmp/comments"
   setup_case "$case_dir"
@@ -290,6 +317,8 @@ trap cleanup EXIT
 test_default_commands_file_runs_last
 test_commands_file_override
 test_skip_commands
+test_step_count_includes_enabled_custom_commands
+test_step_count_excludes_disabled_custom_commands
 test_comments_and_blank_lines_ignored
 test_command_failure_does_not_stop_next
 test_missing_optional_repo_is_skipped
