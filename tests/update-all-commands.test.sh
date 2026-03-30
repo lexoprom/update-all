@@ -103,8 +103,9 @@ EOF
 
 setup_case() {
   local case_dir="$1"
-  mkdir -p "$case_dir/bin" "$case_dir/home"
+  mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
   cp ./update-all "$case_dir/update-all"
+  cp ./lib/pm-helpers.sh "$case_dir/lib/pm-helpers.sh"
   chmod +x "$case_dir/update-all"
   make_fake_cmds "$case_dir/bin"
 }
