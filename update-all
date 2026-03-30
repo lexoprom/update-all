@@ -30,7 +30,7 @@ resolve_script_path() {
 SCRIPT_PATH="$(resolve_script_path "${BASH_SOURCE[0]:-$0}")"
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 COMMANDS_FILE="$SCRIPT_DIR/update-all.commands"
-source "$SCRIPT_DIR/lib/pm-helpers.sh"
+source "$SCRIPT_DIR/lib/global-packages.sh"
 
 if [[ ! -d "$REPORT_DIR" ]]; then
     echo "Failed to create report directory. Exiting." >&2
@@ -226,120 +226,9 @@ update_custom_commands() {
     fi
 }
 
-# --- Per-PM functions ---
-# Each PM provides: pm_<name>_installed and pm_<name>_run.
-
-pm_pipx_installed() { command_exists pipx; }
-pm_pipx_run() {
-    if pipx upgrade-all > "$REPORT_DIR/pipx.log" 2>&1; then
-        parse_pipx_output < "$REPORT_DIR/pipx.log"
-    else
-        echo -e "${RED}⚠️ Pipx upgrade failed. Details:${NC}"
-        cat "$REPORT_DIR/pipx.log"
-        return 1
-    fi
-}
-
-pm_npm_installed() { command_exists npm; }
-pm_npm_run() {
-    declare -A old_versions=()
-    parse_npm_tree old_versions < <(npm list -g --depth=0 2>/dev/null)
-
-    local -a packages=()
-    readarray -t packages < <(map_to_latest old_versions npm)
-
-    if [[ ${#packages[@]} -eq 0 ]]; then
-        echo "No global npm packages detected."
-        return 0
-    fi
-
-    echo "Updating npm globals: ${packages[*]}"
-    if npm install -g "${packages[@]}" > "$REPORT_DIR/npm_install.log" 2>&1; then
-        declare -A new_versions=()
-        parse_npm_tree new_versions < <(npm list -g --depth=0 2>/dev/null)
-        print_version_diff old_versions new_versions
-    else
-        echo -e "${RED}⚠️ npm update failed. Details:${NC}"
-        cat "$REPORT_DIR/npm_install.log"
-        return 1
-    fi
-}
-
-pm_bun_installed() { command_exists bun; }
-pm_bun_run() {
-    local workdir
-    workdir="$(mktemp -d "/tmp/${SCRIPT_NAME}_bun.XXXXXX")"
-
-    declare -A old_versions=()
-    parse_bun_tree old_versions < <(cd "$workdir" && bun pm ls -g 2>/dev/null)
-
-    local -a packages=()
-    readarray -t packages < <(map_to_latest old_versions)
-
-    if [[ ${#packages[@]} -eq 0 ]]; then
-        echo "No global Bun packages detected."
-        rm -rf "$workdir"
-        return 0
-    fi
-
-    echo "Updating Bun globals: ${packages[*]}"
-    if (cd "$workdir" && bun add -g "${packages[@]}") > "$REPORT_DIR/bun_install.log" 2>&1; then
-        declare -A new_versions=()
-        parse_bun_tree new_versions < <(cd "$workdir" && bun pm ls -g 2>/dev/null)
-        print_version_diff old_versions new_versions
-    else
-        echo -e "${RED}⚠️ Bun update failed. Details:${NC}"
-        cat "$REPORT_DIR/bun_install.log"
-        rm -rf "$workdir"
-        return 1
-    fi
-    rm -rf "$workdir"
-}
-
-# --- PM orchestrator ---
-
-# Canonical label mapping
-declare -A PM_LABELS=(
-    [pipx]="pipx packages"
-    [npm]="npm global packages"
-    [bun]="bun global packages"
-)
-
-# Known PM names — the orchestrator iterates over this list.
-PM_NAMES=(pipx npm bun)
-
-# Run a single PM in a subshell, reporting status via log_status.
-update_pm() {
-    local name="$1"
-    local label="${PM_LABELS[$name]:-$name packages}"
-    if ! "pm_${name}_installed"; then
-        log_status "$label" "⏭️ Not installed"
-        return
-    fi
-    if [[ "$DRY_RUN" = true ]]; then
-        log_status "$label" "🔍 Dry run"
-        return
-    fi
-    local exit_code
-    set +e
-    "pm_${name}_run"
-    exit_code=$?
-    set -e
-    log_status "$label" "$([[ "$exit_code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
-}
-
-# Update all known PMs in parallel.
 update_global_packages() {
-    local pids=()
-    local pm
-    for pm in "${PM_NAMES[@]}"; do
-        update_pm "$pm" & pids+=($!)
-    done
-
-    if [[ ${#pids[@]} -gt 0 ]]; then
-        echo "Waiting for package managers..."
-        wait "${pids[@]}"
-    fi
+    declare -A result=()
+    global_packages_run result "$REPORT_DIR" "$DRY_RUN" log_status
 }
 
 
