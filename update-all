@@ -64,12 +64,6 @@ trap cleanup EXIT INT TERM
 # Utility functions
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
-print_header() {
-    echo -e "\n${YELLOW}=======================================================${NC}"
-    echo -e "${GREEN}$1${NC}"
-    echo -e "${YELLOW}=======================================================${NC}\n"
-}
-
 show_progress() {
     local current="$1"
     local total="$2"
@@ -91,7 +85,6 @@ safe_execute() {
     if [[ "$DRY_RUN" = true ]]; then
         echo -e "${CYAN}[DRY RUN] Would execute: $*${NC}"
         log_status "$description" "🔍 Dry run"
-        SAFE_EXECUTE_LAST_EXIT_CODE=0
         return 0
     fi
 
@@ -140,24 +133,6 @@ acquire_lock() {
         fi
     fi
     echo "$$" > "$LOCK_FILE"
-}
-
-get_user_input() {
-    local prompt="$1"
-    local timeout="${2:-15}"
-    local default="${3:-n}"
-    echo -e "${BLUE}$prompt (y/n - timeout in ${timeout}s)${NC}"
-    local input
-    if read -r -t "$timeout" input 2>/dev/null; then
-        case "$input" in
-            [Yy]|[Yy][Ee][Ss]) return 0 ;;
-            [Nn]|[Nn][Oo]|"") return 1 ;;
-            *) [[ "$default" = "y" ]] ;;
-        esac
-    else
-        echo -e "\nTimeout reached. Using default: $default"
-        [[ "$default" = "y" ]]
-    fi
 }
 
 # --- UPDATE FUNCTIONS ---

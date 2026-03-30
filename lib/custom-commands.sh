@@ -49,7 +49,7 @@ custom_commands_handle_disabled() {
 }
 
 _custom_commands_run_command() {
-    local label="$1"
+    local _="$1"
     local line="$2"
     bash -lc "$line"
 }

@@ -28,11 +28,7 @@ tool_runner_define_phase() {
     local phase="$1"
     local mode="$2"
     local wait_message="${3:-}"
-    local existing
 
-    for existing in "${TOOL_RUNNER_PHASE_ORDER[@]}"; do
-        [[ "$existing" == "$phase" ]] && break
-    done
     [[ " ${TOOL_RUNNER_PHASE_ORDER[*]} " == *" $phase "* ]] || TOOL_RUNNER_PHASE_ORDER+=("$phase")
 
     TOOL_RUNNER_PHASE_MODES["$phase"]="$mode"
@@ -208,8 +204,8 @@ tool_runner_generate_summary() {
 
     if [[ -f "$commands_index" ]]; then
         echo -e "\n${green}Custom commands${nc}"
-        while IFS=$'\t' read -r label cmd; do
-            [[ -z "${label:-}" ]] && continue
+        while IFS=$'\t' read -r _ cmd; do
+            [[ -z "${cmd:-}" ]] && continue
             echo -e "${cyan}- $cmd${nc}"
         done < "$commands_index"
     fi

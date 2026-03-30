@@ -29,6 +29,28 @@ _global_packages_emit_status() {
     "$sink" "$label" "$status"
 }
 
+_global_packages_log_failure() {
+    local log_file="$1"
+    local message="$2"
+    local red="${RED:-\033[0;31m}"
+    local nc="${NC:-\033[0m}"
+
+    echo -e "${red}${message}${nc}"
+    cat "$log_file"
+}
+
+_global_packages_set_status() {
+    local -n _result="$1"
+    local pm="$2"
+    local label="$3"
+    local status="$4"
+    local sink="${5:-}"
+
+    _result["label.$pm"]="$label"
+    _result["status.$pm"]="$status"
+    _global_packages_emit_status "$sink" "$label" "$status"
+}
+
 _global_packages_supported() {
     declare -F "_global_packages_${1}_installed" >/dev/null &&
         declare -F "_global_packages_${1}_run" >/dev/null
@@ -37,14 +59,12 @@ _global_packages_supported() {
 _global_packages_pipx_installed() { _global_packages_command_exists pipx; }
 _global_packages_pipx_run() {
     local report_dir="$1"
-    local red="${RED:-\033[0;31m}"
-    local nc="${NC:-\033[0m}"
+    local log_file="$report_dir/pipx.log"
 
-    if pipx upgrade-all > "$report_dir/pipx.log" 2>&1; then
-        parse_pipx_output < "$report_dir/pipx.log"
+    if pipx upgrade-all > "$log_file" 2>&1; then
+        parse_pipx_output < "$log_file"
     else
-        echo -e "${red}⚠️ Pipx upgrade failed. Details:${nc}"
-        cat "$report_dir/pipx.log"
+        _global_packages_log_failure "$log_file" "⚠️ Pipx upgrade failed. Details:"
         return 1
     fi
 }
@@ -52,8 +72,7 @@ _global_packages_pipx_run() {
 _global_packages_npm_installed() { _global_packages_command_exists npm; }
 _global_packages_npm_run() {
     local report_dir="$1"
-    local red="${RED:-\033[0;31m}"
-    local nc="${NC:-\033[0m}"
+    local log_file="$report_dir/npm_install.log"
 
     declare -A old_versions=()
     parse_npm_tree old_versions < <(npm list -g --depth=0 2>/dev/null)
@@ -67,13 +86,12 @@ _global_packages_npm_run() {
     fi
 
     echo "Updating npm globals: ${packages[*]}"
-    if npm install -g "${packages[@]}" > "$report_dir/npm_install.log" 2>&1; then
+    if npm install -g "${packages[@]}" > "$log_file" 2>&1; then
         declare -A new_versions=()
         parse_npm_tree new_versions < <(npm list -g --depth=0 2>/dev/null)
         print_version_diff old_versions new_versions
     else
-        echo -e "${red}⚠️ npm update failed. Details:${nc}"
-        cat "$report_dir/npm_install.log"
+        _global_packages_log_failure "$log_file" "⚠️ npm update failed. Details:"
         return 1
     fi
 }
@@ -81,8 +99,7 @@ _global_packages_npm_run() {
 _global_packages_bun_installed() { _global_packages_command_exists bun; }
 _global_packages_bun_run() {
     local report_dir="$1"
-    local red="${RED:-\033[0;31m}"
-    local nc="${NC:-\033[0m}"
+    local log_file="$report_dir/bun_install.log"
     local workdir
     local exit_code=0
 
@@ -101,13 +118,12 @@ _global_packages_bun_run() {
     fi
 
     echo "Updating Bun globals: ${packages[*]}"
-    if (cd "$workdir" && bun add -g "${packages[@]}") > "$report_dir/bun_install.log" 2>&1; then
+    if (cd "$workdir" && bun add -g "${packages[@]}") > "$log_file" 2>&1; then
         declare -A new_versions=()
         parse_bun_tree new_versions < <(cd "$workdir" && bun pm ls -g 2>/dev/null)
         print_version_diff old_versions new_versions
     else
-        echo -e "${red}⚠️ Bun update failed. Details:${nc}"
-        cat "$report_dir/bun_install.log"
+        _global_packages_log_failure "$log_file" "⚠️ Bun update failed. Details:"
         exit_code=1
     fi
 
@@ -155,28 +171,23 @@ global_packages_run() {
 
     for pm in "${managers[@]}"; do
         label="$(_global_packages_label "$pm")"
-        _result["label.$pm"]="$label"
 
         if ! _global_packages_supported "$pm"; then
-            status="❌ Failed"
-            _result["status.$pm"]="$status"
-            _global_packages_emit_status "$status_sink" "$label" "$status"
+            _global_packages_set_status _result "$pm" "$label" "❌ Failed" "$status_sink"
             continue
         fi
 
         if ! "_global_packages_${pm}_installed"; then
-            status="⏭️ Not installed"
-            _result["status.$pm"]="$status"
-            _global_packages_emit_status "$status_sink" "$label" "$status"
+            _global_packages_set_status _result "$pm" "$label" "⏭️ Not installed" "$status_sink"
             continue
         fi
 
         if [[ "$dry_run" == true ]]; then
-            status="🔍 Dry run"
-            _result["status.$pm"]="$status"
-            _global_packages_emit_status "$status_sink" "$label" "$status"
+            _global_packages_set_status _result "$pm" "$label" "🔍 Dry run" "$status_sink"
             continue
         fi
+
+        _result["label.$pm"]="$label"
 
         _global_packages_run_one "$pm" "$report_dir" "$state_dir" &
         pid=$!

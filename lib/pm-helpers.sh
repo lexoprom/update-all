@@ -98,7 +98,7 @@ print_version_diff() {
 map_to_latest() {
     local -n _pkgs="$1"
     shift
-    local pkg name
+    local name
     for name in "${!_pkgs[@]}"; do
         local skip=false
         local excl
