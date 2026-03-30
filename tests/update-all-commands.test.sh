@@ -55,12 +55,44 @@ EOF
 exit 0
 EOF
 
+  cat > "$bindir/npm" <<'EOF'
+#!/usr/bin/env bash
+state_file="${FAKE_NPM_STATE_FILE:-}"
+if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
+  if [[ -n "$state_file" && -f "$state_file" ]]; then
+    cat "$state_file"
+  elif [[ -n "${FAKE_NPM_LIST_OUTPUT:-}" ]]; then
+    printf '%s\n' "$FAKE_NPM_LIST_OUTPUT"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "install" && "${2:-}" == "-g" ]]; then
+  if [[ -n "${FAKE_NPM_RECORD_FILE:-}" ]]; then
+    printf 'args=%s\n' "$*" > "$FAKE_NPM_RECORD_FILE"
+  fi
+  if [[ -n "$state_file" && -n "${FAKE_NPM_NEXT_LIST_OUTPUT:-}" ]]; then
+    printf '%s\n' "$FAKE_NPM_NEXT_LIST_OUTPUT" > "$state_file"
+  fi
+  exit 0
+fi
+exit 0
+EOF
+
   cat > "$bindir/bun" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "pm" && "${2:-}" == "ls" && "${3:-}" == "-g" ]]; then
+  if [[ -n "${FAKE_BUN_LS_OUTPUT:-}" ]]; then
+    printf '%s\n' "$FAKE_BUN_LS_OUTPUT"
+  fi
   exit 0
 fi
 if [[ "${1:-}" == "add" && "${2:-}" == "-g" ]]; then
+  if [[ -n "${FAKE_BUN_RECORD_FILE:-}" ]]; then
+    {
+      printf 'pwd=%s\n' "$PWD"
+      printf 'args=%s\n' "$*"
+    } > "$FAKE_BUN_RECORD_FILE"
+  fi
   exit 0
 fi
 exit 0
@@ -194,6 +226,61 @@ test_missing_optional_repo_is_skipped() {
   assert_contains "$out" "Completed (2)"
 }
 
+test_npm_globals_install_latest() {
+  local case_dir="$tmp/npm-latest"
+  setup_case "$case_dir"
+  : > "$case_dir/update-all.commands"
+
+  export FAKE_NPM_STATE_FILE="$case_dir/npm-state.txt"
+  export FAKE_NPM_RECORD_FILE="$case_dir/npm-record.txt"
+  printf '%s\n' '/fake/lib' '├── npm@10.9.0' '├── typescript@5.8.2' '└── @antfu/ni@24.2.0' > "$FAKE_NPM_STATE_FILE"
+  export FAKE_NPM_NEXT_LIST_OUTPUT=$'/fake/lib\n├── npm@10.9.0\n├── typescript@5.9.0\n└── @antfu/ni@24.3.0'
+
+  local out
+  out="$(run_case "$case_dir")"
+
+  [[ -f "$case_dir/npm-record.txt" ]] || fail "npm install -g was not called"
+  local record
+  record="$(<"$case_dir/npm-record.txt")"
+
+  assert_contains "$record" "args=install -g"
+  assert_contains "$record" "typescript@latest"
+  assert_contains "$record" "@antfu/ni@latest"
+  assert_not_contains "$record" "npm@latest"
+  assert_contains "$out" "Updating npm globals:"
+  assert_contains "$out" "typescript: 5.8.2 → 5.9.0"
+  assert_contains "$out" "@antfu/ni: 24.2.0 → 24.3.0"
+
+  unset FAKE_NPM_STATE_FILE
+  unset FAKE_NPM_RECORD_FILE
+  unset FAKE_NPM_NEXT_LIST_OUTPUT
+}
+
+test_bun_globals_use_temp_dir_and_latest() {
+  local case_dir="$tmp/bun-latest"
+  setup_case "$case_dir"
+  : > "$case_dir/update-all.commands"
+
+  export FAKE_BUN_LS_OUTPUT=$'├── wrangler@4.73.0\n└── vercel@50.33.0'
+  export FAKE_BUN_RECORD_FILE="$case_dir/bun-record.txt"
+
+  local out
+  out="$(run_case "$case_dir")"
+
+  [[ -f "$case_dir/bun-record.txt" ]] || fail "bun add -g was not called"
+  local record
+  record="$(<"$case_dir/bun-record.txt")"
+
+  assert_contains "$record" "args=add -g"
+  assert_contains "$record" "wrangler@latest"
+  assert_contains "$record" "vercel@latest"
+  assert_not_contains "$record" "pwd=$case_dir/home"
+  assert_contains "$out" "Updating Bun globals:"
+
+  unset FAKE_BUN_LS_OUTPUT
+  unset FAKE_BUN_RECORD_FILE
+}
+
 tmp="$(mktemp -d)"
 HOST_BASH_DIR="$(dirname "$(command -v bash)")"
 cleanup() { rm -rf "$tmp"; }
@@ -205,5 +292,7 @@ test_skip_commands
 test_comments_and_blank_lines_ignored
 test_command_failure_does_not_stop_next
 test_missing_optional_repo_is_skipped
+test_npm_globals_install_latest
+test_bun_globals_use_temp_dir_and_latest
 
 echo "PASS"

@@ -269,10 +269,81 @@ update_global_packages() {
         log_status "pipx packages" "⏭️ Not installed"
     fi
 
-    # 2. Update Bun Global Packages
+    # 2. Update npm Global Packages
+    if command_exists npm; then
+        if [[ "$DRY_RUN" = false ]]; then
+            (
+                # Capture current versions (package@version format)
+                declare -A OLD_VERSIONS=()
+                while IFS= read -r pkg; do
+                    name=$(echo "$pkg" | sed -E 's/@[^@]+$//')
+                    version=$(echo "$pkg" | grep -oE '@[^@]+$' | sed 's/@//')
+                    [[ "$name" == "npm" ]] && continue
+                    [[ -n "$name" && -n "$version" ]] && OLD_VERSIONS["$name"]="$version"
+                done < <(npm list -g --depth=0 2>/dev/null | sed -nE 's/^[[:space:]]*([├└]── |\+-- |`-- )(.+)$/\2/p')
+
+                local packages=()
+                local package
+                for package in "${!OLD_VERSIONS[@]}"; do
+                    packages+=("${package}@latest")
+                done
+
+                if [[ ${#packages[@]} -gt 0 ]]; then
+                    echo "Updating npm globals: ${packages[*]}"
+
+                    if npm install -g "${packages[@]}" > "$REPORT_DIR/npm_install.log" 2>&1; then
+                        echo 0 > "$REPORT_DIR/npm_exit"
+
+                        # Capture new versions and compare
+                        declare -A NEW_VERSIONS=()
+                        while IFS= read -r pkg; do
+                            name=$(echo "$pkg" | sed -E 's/@[^@]+$//')
+                            version=$(echo "$pkg" | grep -oE '@[^@]+$' | sed 's/@//')
+                            [[ "$name" == "npm" ]] && continue
+                            [[ -n "$name" && -n "$version" ]] && NEW_VERSIONS["$name"]="$version"
+                        done < <(npm list -g --depth=0 2>/dev/null | sed -nE 's/^[[:space:]]*([├└]── |\+-- |`-- )(.+)$/\2/p')
+
+                        # Show version changes
+                        local updated=0
+                        for name in "${!OLD_VERSIONS[@]}"; do
+                            old_ver="${OLD_VERSIONS[$name]}"
+                            new_ver="${NEW_VERSIONS[$name]:-}"
+                            if [[ -n "$new_ver" && "$old_ver" != "$new_ver" ]]; then
+                                echo -e "${GREEN}  ↑ $name: $old_ver → $new_ver${NC}"
+                                ((updated++))
+                            fi
+                        done
+                        if [[ $updated -eq 0 ]]; then
+                            echo "All npm packages already up to date."
+                        else
+                            echo "Updated $updated npm package(s)."
+                        fi
+                    else
+                        echo -e "${RED}⚠️ npm update failed. Details:${NC}"
+                        cat "$REPORT_DIR/npm_install.log"
+                        echo 1 > "$REPORT_DIR/npm_exit"
+                    fi
+                else
+                    echo "No global npm packages detected."
+                    echo 0 > "$REPORT_DIR/npm_exit"
+                fi
+            ) &
+            pids+=($!)
+        else
+            echo -e "${CYAN}[DRY RUN] Would execute: npm install -g <detected_packages@latest>${NC}"
+            log_status "npm global packages" "🔍 Dry run"
+        fi
+    else
+        log_status "npm global packages" "⏭️ Not installed"
+    fi
+
+    # 3. Update Bun Global Packages
     if command_exists bun; then
         if [[ "$DRY_RUN" = false ]]; then
             (
+                local bun_workdir
+                bun_workdir="$(mktemp -d "/tmp/${SCRIPT_NAME}_bun.XXXXXX")"
+
                 # Capture current versions (package@version format)
                 declare -A OLD_VERSIONS=()
                 while IFS= read -r line; do
@@ -280,14 +351,18 @@ update_global_packages() {
                     name=$(echo "$pkg" | sed -E 's/@[^@]+$//')
                     version=$(echo "$pkg" | grep -oE '@[^@]+$' | sed 's/@//')
                     [[ -n "$name" && -n "$version" ]] && OLD_VERSIONS["$name"]="$version"
-                done < <(bun pm ls -g 2>/dev/null | awk '/^[├└]/')
+                done < <(cd "$bun_workdir" && bun pm ls -g 2>/dev/null | awk '/^[├└]/')
 
-                PACKAGES="${!OLD_VERSIONS[*]}"
+                local packages=()
+                local package
+                for package in "${!OLD_VERSIONS[@]}"; do
+                    packages+=("${package}@latest")
+                done
 
-                if [[ -n "$PACKAGES" ]]; then
-                    echo "Updating Bun globals: $PACKAGES"
+                if [[ ${#packages[@]} -gt 0 ]]; then
+                    echo "Updating Bun globals: ${packages[*]}"
 
-                    if bun add -g $PACKAGES > "$REPORT_DIR/bun_install.log" 2>&1; then
+                    if (cd "$bun_workdir" && bun add -g "${packages[@]}") > "$REPORT_DIR/bun_install.log" 2>&1; then
                         echo 0 > "$REPORT_DIR/bun_exit"
 
                         # Capture new versions and compare
@@ -297,7 +372,7 @@ update_global_packages() {
                             name=$(echo "$pkg" | sed -E 's/@[^@]+$//')
                             version=$(echo "$pkg" | grep -oE '@[^@]+$' | sed 's/@//')
                             [[ -n "$name" && -n "$version" ]] && NEW_VERSIONS["$name"]="$version"
-                        done < <(bun pm ls -g 2>/dev/null | awk '/^[├└]/')
+                        done < <(cd "$bun_workdir" && bun pm ls -g 2>/dev/null | awk '/^[├└]/')
 
                         # Show version changes
                         local updated=0
@@ -323,10 +398,12 @@ update_global_packages() {
                     echo "No global Bun packages detected."
                     echo 0 > "$REPORT_DIR/bun_exit"
                 fi
+
+                rm -rf "$bun_workdir"
             ) &
             pids+=($!)
         else
-            echo -e "${CYAN}[DRY RUN] Would execute: bun add -g <detected_packages>${NC}"
+            echo -e "${CYAN}[DRY RUN] Would execute: (cd <temp_dir> && bun add -g <detected_packages@latest>)${NC}"
             log_status "bun global packages" "🔍 Dry run"
         fi
     else
@@ -340,6 +417,11 @@ update_global_packages() {
         command_exists pipx && [[ "$DRY_RUN" = false ]] && {
             local code=$(cat "$REPORT_DIR/pipx_exit" 2>/dev/null || echo "1")
             log_status "pipx packages" "$([[ "$code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
+        }
+
+        command_exists npm && [[ "$DRY_RUN" = false ]] && {
+            local code=$(cat "$REPORT_DIR/npm_exit" 2>/dev/null || echo "1")
+            log_status "npm global packages" "$([[ "$code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
         }
 
         command_exists bun && [[ "$DRY_RUN" = false ]] && {
@@ -385,7 +467,7 @@ generate_summary() {
     echo -e "\n${YELLOW}=======================================================${NC}"
     echo -e "${GREEN}Update Summary Report${NC}"
     echo -e "${YELLOW}=======================================================${NC}\n"
-    local ordered=("Homebrew update" "Homebrew upgrade" "Homebrew cleanup" "mise tool upgrades" "mise reshim" "pipx packages" "bun global packages" "macOS Updates" "custom commands")
+    local ordered=("Homebrew update" "Homebrew upgrade" "Homebrew cleanup" "mise tool upgrades" "mise reshim" "pipx packages" "npm global packages" "bun global packages" "macOS Updates" "custom commands")
     for component in "${ordered[@]}"; do
         if [[ -n "${report_status[$component]+_}" ]]; then
             printf "${BLUE}%-45s${NC} %s\n" "$component:" "${report_status[$component]}"
@@ -475,7 +557,7 @@ EOF
 
     # 3. PHASE 2: Global Packages
     local phase2_jobs=()
-    show_progress "Updating global packages (Bun, Pipx)"
+    show_progress "Updating global packages (Bun, npm, Pipx)"
     (update_global_packages) & phase2_jobs+=($!)
 
     if [[ ${#phase2_jobs[@]} -gt 0 ]]; then
