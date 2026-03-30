@@ -31,6 +31,7 @@ SCRIPT_PATH="$(resolve_script_path "${BASH_SOURCE[0]:-$0}")"
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 COMMANDS_FILE="$SCRIPT_DIR/update-all.commands"
 source "$SCRIPT_DIR/lib/global-packages.sh"
+source "$SCRIPT_DIR/lib/custom-commands.sh"
 source "$SCRIPT_DIR/lib/tool-runner.sh"
 
 if [[ ! -d "$REPORT_DIR" ]]; then
@@ -62,11 +63,6 @@ trap cleanup EXIT INT TERM
 
 # Utility functions
 command_exists() { command -v "$1" >/dev/null 2>&1; }
-
-commands_file_has_entries() {
-    local file="$1"
-    [[ -f "$file" ]] && grep -Eq '^[[:space:]]*[^#[:space:]]' "$file"
-}
 
 print_header() {
     echo -e "\n${YELLOW}=======================================================${NC}"
@@ -177,52 +173,15 @@ update_mise_tools() {
     safe_execute "mise reshim" mise reshim
 }
 
+run_custom_command() {
+    local label="$1"
+    local line="$2"
+    safe_execute "$label" bash -lc "$line"
+}
+
 update_custom_commands() {
-    local file="$COMMANDS_FILE"
-
-    if [[ "$SKIP_COMMANDS" = true ]]; then
-        log_status "custom commands" "⏭️ Skipped"
-        return
-    fi
-
-    if ! commands_file_has_entries "$file"; then
-        log_status "custom commands" "⏭️ No commands file"
-        return
-    fi
-
-    local idxfile="$REPORT_DIR/commands.index"
-    : > "$idxfile"
-
-    local i=0
-    local failures=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -z "$line" ]] && continue
-        [[ "$line" == \#* ]] && continue
-
-        i=$((i + 1))
-        local label
-        label="command $(printf '%02d' "$i")"
-        printf '%s\t%s\n' "$label" "$line" >> "$idxfile"
-
-        if [[ "$DRY_RUN" = true ]]; then
-            echo -e "${CYAN}[DRY RUN] Would execute: $line${NC}"
-            log_status "$label" "🔍 Dry run"
-            continue
-        fi
-
-        safe_execute "$label" bash -lc "$line"
-        if [[ $? -ne 0 ]]; then
-            failures=$((failures + 1))
-        fi
-    done < "$file"
-
-    if [[ $failures -eq 0 ]]; then
-        log_status "custom commands" "✅ Completed ($i)"
-    else
-        log_status "custom commands" "❌ Failed ($failures of $i)"
-    fi
+    declare -A result=()
+    custom_commands_run result "$COMMANDS_FILE" "$REPORT_DIR" "$DRY_RUN" log_status run_custom_command
 }
 
 update_global_packages() {
@@ -268,14 +227,10 @@ global_packages_tool_components() {
 }
 
 custom_commands_tool_enabled() {
-    [[ "$SKIP_COMMANDS" = false ]] && commands_file_has_entries "$COMMANDS_FILE"
+    custom_commands_should_run "$SKIP_COMMANDS" "$COMMANDS_FILE"
 }
 custom_commands_tool_disabled() {
-    if [[ "$SKIP_COMMANDS" = true ]]; then
-        log_status "custom commands" "⏭️ Skipped"
-    else
-        log_status "custom commands" "⏭️ No commands file"
-    fi
+    custom_commands_handle_disabled "$SKIP_COMMANDS" log_status
 }
 custom_commands_tool_components() { printf '%s\n' "custom commands"; }
 

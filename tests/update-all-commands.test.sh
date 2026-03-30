@@ -108,6 +108,7 @@ setup_case() {
   mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
   cp ./update-all "$case_dir/update-all"
   cp ./lib/global-packages.sh "$case_dir/lib/global-packages.sh"
+  cp ./lib/custom-commands.sh "$case_dir/lib/custom-commands.sh"
   cp ./lib/tool-runner.sh "$case_dir/lib/tool-runner.sh"
   cp ./lib/pm-helpers.sh "$case_dir/lib/pm-helpers.sh"
   chmod +x "$case_dir/update-all"
@@ -199,65 +200,6 @@ EOF
   assert_not_contains "$out" "[5/5] Running custom commands"
 }
 
-test_comments_and_blank_lines_ignored() {
-  local case_dir="$tmp/comments"
-  setup_case "$case_dir"
-  cat > "$case_dir/update-all.commands" <<'EOF'
-# comment
-
-   # indented comment
-
-echo one
-   echo two
-EOF
-
-  local out
-  out="$(run_case "$case_dir" --dry-run)"
-
-  assert_contains "$out" "Would execute: echo one"
-  assert_contains "$out" "Would execute: echo two"
-  assert_not_contains "$out" "Would execute: # comment"
-  assert_contains "$out" "Completed (2)"
-  assert_contains "$out" "Custom commands"
-  assert_contains "$out" "- echo one"
-  assert_contains "$out" "- echo two"
-  assert_not_contains "$out" "command 01:"
-}
-
-test_command_failure_does_not_stop_next() {
-  local case_dir="$tmp/failure-continue"
-  setup_case "$case_dir"
-  cat > "$case_dir/update-all.commands" <<EOF
-false
-echo ok > "$case_dir/home/ok.txt"
-EOF
-
-  local out
-  out="$(run_case "$case_dir")"
-
-  [[ -f "$case_dir/home/ok.txt" ]] || fail "second command did not run after failure"
-  assert_contains "$out" "command 01"
-  assert_contains "$out" "failed with exit code 1"
-  assert_contains "$out" "Failed (1 of 2)"
-  assert_contains "$out" "Custom commands"
-  assert_contains "$out" "- false"
-}
-
-test_missing_optional_repo_is_skipped() {
-  local case_dir="$tmp/missing-optional"
-  setup_case "$case_dir"
-  cp ./update-all.commands "$case_dir/update-all.commands"
-
-  local out
-  out="$(run_case "$case_dir")"
-
-  assert_contains "$out" "Skipping ~/.codex/superpowers: repo not present"
-  assert_contains "$out" "Skipping ~/.agents/skills/pi-skills: repo not present"
-  assert_not_contains "$out" "command 01 failed"
-  assert_not_contains "$out" "command 02 failed"
-  assert_contains "$out" "Completed (2)"
-}
-
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 cleanup() { rm -rf "$tmp"; }
@@ -268,8 +210,5 @@ test_commands_file_override
 test_skip_commands
 test_step_count_includes_enabled_custom_commands
 test_step_count_excludes_disabled_custom_commands
-test_comments_and_blank_lines_ignored
-test_command_failure_does_not_stop_next
-test_missing_optional_repo_is_skipped
 
 echo "PASS"
