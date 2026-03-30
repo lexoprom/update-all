@@ -46,10 +46,8 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # Status tracking
-declare -A report_status=()
 current_step=0
 total_steps=0
-SAFE_EXECUTE_LAST_EXIT_CODE=0
 
 # Cleanup on exit
 cleanup() {
@@ -88,7 +86,7 @@ log_status() {
     local component="$1"
     local status="$2"
     [[ -d "$REPORT_DIR" ]] || return
-    printf '%s\t%s\n' "$component" "$status" >> "$REPORT_DIR/${BASHPID}.log"
+    printf '%s\t%s\n' "$component" "$status" >> "$REPORT_DIR/status.log"
 }
 
 # Execute command with proper error handling and reporting
@@ -127,8 +125,7 @@ safe_execute() {
             done <<< "$output"
         fi
     fi
-    SAFE_EXECUTE_LAST_EXIT_CODE=$exit_code
-    return 0
+    return $exit_code
 }
 
 acquire_lock() {
@@ -217,7 +214,7 @@ update_custom_commands() {
         fi
 
         safe_execute "$label" bash -lc "$line"
-        if [[ $SAFE_EXECUTE_LAST_EXIT_CODE -ne 0 ]]; then
+        if [[ $? -ne 0 ]]; then
             failures=$((failures + 1))
         fi
     done < "$file"
@@ -311,8 +308,7 @@ declare -A PM_LABELS=(
 # Known PM names — the orchestrator iterates over this list.
 PM_NAMES=(pipx npm bun)
 
-# Run a single PM, writing exit code to REPORT_DIR.
-# Meant to be called in a subshell: update_pm <name> &
+# Run a single PM in a subshell, reporting status via log_status.
 update_pm() {
     local name="$1"
     local label="${PM_LABELS[$name]:-$name packages}"
@@ -329,10 +325,10 @@ update_pm() {
     "pm_${name}_run"
     exit_code=$?
     set -e
-    echo "$exit_code" > "$REPORT_DIR/${name}_exit"
+    log_status "$label" "$([[ "$exit_code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
 }
 
-# Update all known PMs in parallel, then collect results.
+# Update all known PMs in parallel.
 update_global_packages() {
     local pids=()
     local pm
@@ -343,15 +339,6 @@ update_global_packages() {
     if [[ ${#pids[@]} -gt 0 ]]; then
         echo "Waiting for package managers..."
         wait "${pids[@]}"
-
-        for pm in "${PM_NAMES[@]}"; do
-            local label="${PM_LABELS[$pm]:-$pm packages}"
-            if [[ -f "$REPORT_DIR/${pm}_exit" ]]; then
-                local code
-                code=$(cat "$REPORT_DIR/${pm}_exit")
-                log_status "$label" "$([[ "$code" -eq 0 ]] && printf '✅ Success' || printf '❌ Failed')"
-            fi
-        done
     fi
 }
 
@@ -374,27 +361,22 @@ check_macos_updates() {
     fi
 }
 
-load_report_status() {
-    declare -gA report_status=()
-    shopt -s nullglob
-    for file in "$REPORT_DIR"/*.log; do
-        while IFS=$'\t' read -r component status; do
-            [[ -z "${component// }" ]] && continue
-            report_status["$component"]="$status"
-        done < "$file"
-    done
-    shopt -u nullglob
-}
-
 generate_summary() {
-    load_report_status
+    declare -A status=()
+    if [[ -f "$REPORT_DIR/status.log" ]]; then
+        while IFS=$'\t' read -r component state; do
+            [[ -z "${component// }" ]] && continue
+            status["$component"]="$state"
+        done < "$REPORT_DIR/status.log"
+    fi
+
     echo -e "\n${YELLOW}=======================================================${NC}"
     echo -e "${GREEN}Update Summary Report${NC}"
     echo -e "${YELLOW}=======================================================${NC}\n"
     local ordered=("Homebrew update" "Homebrew upgrade" "Homebrew cleanup" "mise tool upgrades" "mise reshim" "pipx packages" "npm global packages" "bun global packages" "macOS Updates" "custom commands")
     for component in "${ordered[@]}"; do
-        if [[ -n "${report_status[$component]+_}" ]]; then
-            printf "${BLUE}%-45s${NC} %s\n" "$component:" "${report_status[$component]}"
+        if [[ -n "${status[$component]+_}" ]]; then
+            printf "${BLUE}%-45s${NC} %s\n" "$component:" "${status[$component]}"
         fi
     done
 
