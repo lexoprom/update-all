@@ -108,6 +108,7 @@ setup_case() {
   mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
   cp ./update-all "$case_dir/update-all"
   cp ./lib/global-packages.sh "$case_dir/lib/global-packages.sh"
+  cp ./lib/tool-runner.sh "$case_dir/lib/tool-runner.sh"
   cp ./lib/pm-helpers.sh "$case_dir/lib/pm-helpers.sh"
   chmod +x "$case_dir/update-all"
   make_fake_cmds "$case_dir/bin"

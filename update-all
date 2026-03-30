@@ -31,6 +31,7 @@ SCRIPT_PATH="$(resolve_script_path "${BASH_SOURCE[0]:-$0}")"
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 COMMANDS_FILE="$SCRIPT_DIR/update-all.commands"
 source "$SCRIPT_DIR/lib/global-packages.sh"
+source "$SCRIPT_DIR/lib/tool-runner.sh"
 
 if [[ ! -d "$REPORT_DIR" ]]; then
     echo "Failed to create report directory. Exiting." >&2
@@ -44,10 +45,6 @@ readonly BLUE='\033[0;34m'
 readonly RED='\033[0;31m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
-
-# Status tracking
-current_step=0
-total_steps=0
 
 # Cleanup on exit
 cleanup() {
@@ -78,8 +75,10 @@ print_header() {
 }
 
 show_progress() {
-    current_step=$((current_step + 1))
-    echo -e "${BLUE}[$current_step/$total_steps] $1${NC}"
+    local current="$1"
+    local total="$2"
+    local label="$3"
+    echo -e "${BLUE}[$current/$total] $label${NC}"
 }
 
 log_status() {
@@ -250,146 +249,52 @@ check_macos_updates() {
     fi
 }
 
-# --- Tool registry ---
+# --- Tool runner configuration ---
 
-TOOLS=(homebrew macos mise global_packages custom_commands)
-
-declare -A TOOL_LABELS=(
-    [homebrew]="Updating Homebrew"
-    [macos]="Checking macOS System Updates"
-    [mise]="Updating mise tools (Runtimes)"
-    [global_packages]="Updating global packages (Bun, npm, Pipx)"
-    [custom_commands]="Running custom commands"
-)
-
-declare -A TOOL_PHASES=(
-    [homebrew]="phase1"
-    [macos]="phase1"
-    [mise]="phase1"
-    [global_packages]="phase2"
-    [custom_commands]="post"
-)
-
-tool_homebrew_enabled() { command_exists brew; }
-tool_homebrew_run() { update_homebrew; }
-tool_homebrew_components() {
+homebrew_tool_enabled() { command_exists brew; }
+homebrew_tool_components() {
     printf '%s\n' "Homebrew update" "Homebrew upgrade" "Homebrew cleanup"
 }
 
-tool_macos_enabled() { command_exists softwareupdate; }
-tool_macos_run() { check_macos_updates; }
-tool_macos_components() { printf '%s\n' "macOS Updates"; }
+macos_tool_enabled() { command_exists softwareupdate; }
+macos_tool_components() { printf '%s\n' "macOS Updates"; }
 
-tool_mise_enabled() { command_exists mise; }
-tool_mise_run() { update_mise_tools; }
-tool_mise_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
+mise_tool_enabled() { command_exists mise; }
+mise_tool_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
 
-tool_global_packages_enabled() { return 0; }
-tool_global_packages_run() { update_global_packages; }
-tool_global_packages_components() {
+global_packages_tool_enabled() { return 0; }
+global_packages_tool_components() {
     printf '%s\n' "pipx packages" "npm global packages" "bun global packages"
 }
 
-tool_custom_commands_enabled() {
+custom_commands_tool_enabled() {
     [[ "$SKIP_COMMANDS" = false ]] && commands_file_has_entries "$COMMANDS_FILE"
 }
-tool_custom_commands_run() { update_custom_commands; }
-tool_custom_commands_disabled() {
+custom_commands_tool_disabled() {
     if [[ "$SKIP_COMMANDS" = true ]]; then
         log_status "custom commands" "⏭️ Skipped"
     else
         log_status "custom commands" "⏭️ No commands file"
     fi
 }
-tool_custom_commands_components() { printf '%s\n' "custom commands"; }
+custom_commands_tool_components() { printf '%s\n' "custom commands"; }
 
-tool_is_enabled() { "tool_${1}_enabled"; }
-tool_run() { "tool_${1}_run"; }
-tool_phase() { printf '%s' "${TOOL_PHASES[$1]}"; }
-tool_label() { printf '%s' "${TOOL_LABELS[$1]}"; }
-tool_print_components() { "tool_${1}_components"; }
-tool_handle_disabled() {
-    local fn="tool_${1}_disabled"
-    if declare -F "$fn" >/dev/null; then
-        "$fn"
-    fi
-}
+configure_tool_runner() {
+    tool_runner_reset
+    tool_runner_define_phase "phase1" "parallel" "...Waiting for System & Runtime updates to finish..."
+    tool_runner_define_phase "phase2" "parallel" "...Waiting for Package updates to finish..."
+    tool_runner_define_phase "post" "serial"
 
-count_enabled_tools() {
-    local tool count=0
-    for tool in "${TOOLS[@]}"; do
-        tool_is_enabled "$tool" && ((count++))
-    done
-    echo "$count"
-}
-
-run_parallel_phase() {
-    local phase="$1"
-    local wait_message="$2"
-    local jobs=()
-    local tool
-
-    for tool in "${TOOLS[@]}"; do
-        [[ "$(tool_phase "$tool")" == "$phase" ]] || continue
-        tool_is_enabled "$tool" || continue
-        show_progress "$(tool_label "$tool")"
-        (tool_run "$tool") & jobs+=($!)
-    done
-
-    if [[ ${#jobs[@]} -gt 0 ]]; then
-        echo -e "${BLUE}${wait_message}${NC}"
-        wait "${jobs[@]}"
-    fi
-}
-
-run_serial_phase() {
-    local phase="$1"
-    local tool
-
-    for tool in "${TOOLS[@]}"; do
-        [[ "$(tool_phase "$tool")" == "$phase" ]] || continue
-        if tool_is_enabled "$tool"; then
-            show_progress "$(tool_label "$tool")"
-            tool_run "$tool"
-        else
-            tool_handle_disabled "$tool"
-        fi
-    done
-}
-
-generate_summary() {
-    declare -A status=()
-    local tool component
-
-    if [[ -f "$REPORT_DIR/status.log" ]]; then
-        while IFS=$'\t' read -r component state; do
-            [[ -z "${component// }" ]] && continue
-            status["$component"]="$state"
-        done < "$REPORT_DIR/status.log"
-    fi
-
-    echo -e "\n${YELLOW}=======================================================${NC}"
-    echo -e "${GREEN}Update Summary Report${NC}"
-    echo -e "${YELLOW}=======================================================${NC}\n"
-
-    for tool in "${TOOLS[@]}"; do
-        while IFS= read -r component; do
-            [[ -z "${component:-}" ]] && continue
-            if [[ -n "${status[$component]+_}" ]]; then
-                printf "${BLUE}%-45s${NC} %s\n" "$component:" "${status[$component]}"
-            fi
-        done < <(tool_print_components "$tool")
-    done
-
-    if [[ -f "$REPORT_DIR/commands.index" ]]; then
-        echo -e "\n${GREEN}Custom commands${NC}"
-        while IFS=$'\t' read -r label cmd; do
-            [[ -z "${label:-}" ]] && continue
-            echo -e "${CYAN}- $cmd${NC}"
-        done < "$REPORT_DIR/commands.index"
-    fi
-
-    echo -e "\n${CYAN}Completed on: $(date)${NC}"
+    tool_runner_register "homebrew" "phase1" "Updating Homebrew" \
+        homebrew_tool_enabled update_homebrew homebrew_tool_components
+    tool_runner_register "macos" "phase1" "Checking macOS System Updates" \
+        macos_tool_enabled check_macos_updates macos_tool_components
+    tool_runner_register "mise" "phase1" "Updating mise tools (Runtimes)" \
+        mise_tool_enabled update_mise_tools mise_tool_components
+    tool_runner_register "global_packages" "phase2" "Updating global packages (Bun, npm, Pipx)" \
+        global_packages_tool_enabled update_global_packages global_packages_tool_components
+    tool_runner_register "custom_commands" "post" "Running custom commands" \
+        custom_commands_tool_enabled update_custom_commands custom_commands_tool_components custom_commands_tool_disabled
 }
 
 # --- MAIN EXECUTION ---
@@ -434,14 +339,8 @@ EOF
     export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"
     if command_exists mise; then eval "$(mise activate bash)"; fi
 
-    # Calculate steps from the registry after PATH/setup is complete.
-    total_steps="$(count_enabled_tools)"
-
-    run_parallel_phase "phase1" "...Waiting for System & Runtime updates to finish..."
-    run_parallel_phase "phase2" "...Waiting for Package updates to finish..."
-    run_serial_phase "post"
-
-    generate_summary
+    configure_tool_runner
+    tool_runner_execute "$REPORT_DIR" show_progress
 }
 
 [[ "${DEBUG:-}" == "true" ]] && set -x
