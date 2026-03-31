@@ -1,4 +1,43 @@
 #!/usr/bin/env bash
+
+find_modern_bash() {
+    local candidate
+    local -a candidates=()
+
+    if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
+        candidates+=("$HOMEBREW_PREFIX/bin/bash")
+    fi
+
+    candidates+=(
+        /opt/homebrew/bin/bash
+        /usr/local/bin/bash
+    )
+
+    for candidate in "${candidates[@]}"; do
+        [[ -x "$candidate" ]] || continue
+        "$candidate" -c 'exit $(( BASH_VERSINFO[0] >= 4 ? 0 : 1 ))' >/dev/null 2>&1 || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+
+    return 1
+}
+
+if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
+    if MODERN_BASH="$(find_modern_bash)"; then
+        exec "$MODERN_BASH" "$0" "$@"
+    fi
+
+    cat >&2 <<'EOF'
+update-all requires Bash 4 or newer.
+macOS ships Bash 3.2 at /bin/bash, which cannot run this script.
+Install a newer Bash, for example:
+  brew install bash
+Then run update-all again.
+EOF
+    exit 1
+fi
+
 # Simplified Universal System & Tool Updater - macOS Bash Version (Final Robust)
 set -euo pipefail
 

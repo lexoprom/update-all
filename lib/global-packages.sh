@@ -40,14 +40,14 @@ _global_packages_log_failure() {
 }
 
 _global_packages_set_status() {
-    local -n _result="$1"
+    local -n status_result="$1"
     local pm="$2"
     local label="$3"
     local status="$4"
     local sink="${5:-}"
 
-    _result["label.$pm"]="$label"
-    _result["status.$pm"]="$status"
+    status_result["label.$pm"]="$label"
+    status_result["status.$pm"]="$status"
     _global_packages_emit_status "$sink" "$label" "$status"
 }
 
@@ -152,7 +152,7 @@ _global_packages_run_one() {
 }
 
 global_packages_run() {
-    local -n _result="$1"
+    local -n results_map="$1"
     local report_dir="$2"
     local dry_run="$3"
     local status_sink="${4:-}"
@@ -173,21 +173,21 @@ global_packages_run() {
         label="$(_global_packages_label "$pm")"
 
         if ! _global_packages_supported "$pm"; then
-            _global_packages_set_status _result "$pm" "$label" "❌ Failed" "$status_sink"
+            _global_packages_set_status results_map "$pm" "$label" "❌ Failed" "$status_sink"
             continue
         fi
 
         if ! "_global_packages_${pm}_installed"; then
-            _global_packages_set_status _result "$pm" "$label" "⏭️ Not installed" "$status_sink"
+            _global_packages_set_status results_map "$pm" "$label" "⏭️ Not installed" "$status_sink"
             continue
         fi
 
         if [[ "$dry_run" == true ]]; then
-            _global_packages_set_status _result "$pm" "$label" "🔍 Dry run" "$status_sink"
+            _global_packages_set_status results_map "$pm" "$label" "🔍 Dry run" "$status_sink"
             continue
         fi
 
-        _result["label.$pm"]="$label"
+        results_map["label.$pm"]="$label"
 
         _global_packages_run_one "$pm" "$report_dir" "$state_dir" &
         pid=$!
@@ -204,9 +204,9 @@ global_packages_run() {
 
     for entry in "${pending[@]}"; do
         pm="${entry%%:*}"
-        label="${_result["label.$pm"]}"
+        label="${results_map["label.$pm"]}"
         status="$(< "$state_dir/$pm.status")"
-        _result["status.$pm"]="$status"
+        results_map["status.$pm"]="$status"
 
         if [[ -s "$state_dir/$pm.output" ]]; then
             cat "$state_dir/$pm.output"
@@ -218,8 +218,8 @@ global_packages_run() {
 
     rm -rf "$state_dir"
 
-    _result[failures]="$failures"
-    _result[managers]="${managers[*]}"
+    results_map[failures]="$failures"
+    results_map[managers]="${managers[*]}"
 
     [[ $failures -eq 0 ]]
 }
