@@ -108,6 +108,24 @@ EOF
   chmod +x "$bindir/bun"
 }
 
+create_fake_uv() {
+  local bindir="$1"
+  cat > "$bindir/uv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "tool" && "${2:-}" == "upgrade" && "${3:-}" == "--all" ]]; then
+  if [[ -n "${FAKE_UV_RECORD_FILE:-}" ]]; then
+    printf 'args=%s\n' "$*" > "$FAKE_UV_RECORD_FILE"
+  fi
+  if [[ -n "${FAKE_UV_OUTPUT:-}" ]]; then
+    printf '%s\n' "$FAKE_UV_OUTPUT"
+  fi
+  exit "${FAKE_UV_EXIT_CODE:-0}"
+fi
+exit 0
+EOF
+  chmod +x "$bindir/uv"
+}
+
 setup_case() {
   local case_dir="$1"
   mkdir -p "$case_dir/bin" "$case_dir/report"
@@ -145,6 +163,7 @@ clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
   unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
+  unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
 }
 
 test_pipx_updates_reported_at_boundary() {
@@ -220,6 +239,28 @@ test_bun_globals_use_temp_dir_at_boundary() {
   clear_fake_env
 }
 
+test_uv_tools_upgrade_all_at_boundary() {
+  local case_dir="$tmp/uv"
+  setup_case "$case_dir"
+  create_fake_uv "$case_dir/bin"
+
+  export FAKE_UV_RECORD_FILE="$case_dir/uv-record.txt"
+  export FAKE_UV_OUTPUT=$'Resolved 1 package in 5ms\nUpgraded harbor from 0.3.0 to 0.4.0'
+
+  run_global_packages "$case_dir" false uv
+
+  assert_eq "0" "$TEST_EXIT_CODE" "uv exit"
+  assert_eq "✅ Success" "${TEST_RESULT[status.uv]}" "uv status"
+  local record
+  record="$(< "$case_dir/uv-record.txt")"
+  assert_contains "$record" "args=tool upgrade --all"
+  assert_contains "$TEST_OUTPUT" "Resolved 1 package in 5ms"
+  assert_contains "$TEST_OUTPUT" "Upgraded harbor from 0.3.0 to 0.4.0"
+  assert_contains "$(< "$STATUS_FILE")" $'uv tools\t✅ Success'
+
+  clear_fake_env
+}
+
 test_default_run_handles_dry_run_and_missing_managers() {
   local case_dir="$tmp/dry-run"
   setup_case "$case_dir"
@@ -231,6 +272,7 @@ test_default_run_handles_dry_run_and_missing_managers() {
   assert_eq "⏭️ Not installed" "${TEST_RESULT[status.pipx]}" "pipx skipped"
   assert_eq "🔍 Dry run" "${TEST_RESULT[status.npm]}" "npm dry run"
   assert_eq "⏭️ Not installed" "${TEST_RESULT[status.bun]}" "bun skipped"
+  assert_eq "⏭️ Not installed" "${TEST_RESULT[status.uv]}" "uv skipped"
   assert_eq "0" "${TEST_RESULT[failures]}" "failure count"
   assert_eq "" "$TEST_OUTPUT" "dry-run output"
 
@@ -239,6 +281,7 @@ test_default_run_handles_dry_run_and_missing_managers() {
   assert_contains "$statuses" $'pipx packages\t⏭️ Not installed'
   assert_contains "$statuses" $'npm global packages\t🔍 Dry run'
   assert_contains "$statuses" $'bun global packages\t⏭️ Not installed'
+  assert_contains "$statuses" $'uv tools\t⏭️ Not installed'
 
   clear_fake_env
 }
@@ -254,6 +297,7 @@ trap cleanup EXIT
 test_pipx_updates_reported_at_boundary
 test_npm_globals_install_latest_at_boundary
 test_bun_globals_use_temp_dir_at_boundary
+test_uv_tools_upgrade_all_at_boundary
 test_default_run_handles_dry_run_and_missing_managers
 
 echo "PASS"

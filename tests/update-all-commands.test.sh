@@ -100,6 +100,14 @@ fi
 exit 0
 EOF
 
+  cat > "$bindir/uv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "tool" && "${2:-}" == "upgrade" && "${3:-}" == "--all" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+
   chmod +x "$bindir/"*
 }
 
@@ -196,7 +204,7 @@ EOF
   local out
   out="$(run_case "$case_dir" --dry-run --skip-commands)"
 
-  assert_contains "$out" "[4/4] Updating global packages (Bun, npm, Pipx)"
+  assert_contains "$out" "[4/4] Updating global packages (Bun, npm, Pipx, uv)"
   assert_not_contains "$out" "[5/5] Running custom commands"
 }
 

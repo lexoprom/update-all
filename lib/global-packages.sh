@@ -8,9 +8,10 @@ declare -grA GLOBAL_PACKAGES_LABELS=(
     [pipx]="pipx packages"
     [npm]="npm global packages"
     [bun]="bun global packages"
+    [uv]="uv tools"
 )
 
-declare -gra GLOBAL_PACKAGES_DEFAULT_MANAGERS=(pipx npm bun)
+declare -gra GLOBAL_PACKAGES_DEFAULT_MANAGERS=(pipx npm bun uv)
 
 _global_packages_command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -129,6 +130,19 @@ _global_packages_bun_run() {
 
     rm -rf "$workdir"
     return $exit_code
+}
+
+_global_packages_uv_installed() { _global_packages_command_exists uv; }
+_global_packages_uv_run() {
+    local report_dir="$1"
+    local log_file="$report_dir/uv_tool_upgrade.log"
+
+    if uv tool upgrade --all > "$log_file" 2>&1; then
+        cat "$log_file"
+    else
+        _global_packages_log_failure "$log_file" "⚠️ uv tool upgrade failed. Details:"
+        return 1
+    fi
 }
 
 _global_packages_run_one() {

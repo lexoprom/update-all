@@ -237,7 +237,7 @@ mise_tool_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
 
 global_packages_tool_enabled() { return 0; }
 global_packages_tool_components() {
-    printf '%s\n' "pipx packages" "npm global packages" "bun global packages"
+    printf '%s\n' "pipx packages" "npm global packages" "bun global packages" "uv tools"
 }
 
 custom_commands_tool_enabled() {
@@ -260,7 +260,7 @@ configure_tool_runner() {
         macos_tool_enabled check_macos_updates macos_tool_components
     tool_runner_register "mise" "phase1" "Updating mise tools (Runtimes)" \
         mise_tool_enabled update_mise_tools mise_tool_components
-    tool_runner_register "global_packages" "phase2" "Updating global packages (Bun, npm, Pipx)" \
+    tool_runner_register "global_packages" "phase2" "Updating global packages (Bun, npm, Pipx, uv)" \
         global_packages_tool_enabled update_global_packages global_packages_tool_components
     tool_runner_register "custom_commands" "post" "Running custom commands" \
         custom_commands_tool_enabled update_custom_commands custom_commands_tool_components custom_commands_tool_disabled
