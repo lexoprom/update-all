@@ -80,6 +80,17 @@ fi
 exit 0
 EOF
 
+  cat > "$bindir/pnpm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "update" && "${2:-}" == "-g" && "${3:-}" == "--latest" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+
   cat > "$bindir/bun" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "pm" && "${2:-}" == "ls" && "${3:-}" == "-g" ]]; then
@@ -204,7 +215,7 @@ EOF
   local out
   out="$(run_case "$case_dir" --dry-run --skip-commands)"
 
-  assert_contains "$out" "[4/4] Updating global packages (Bun, npm, Pipx, uv)"
+  assert_contains "$out" "[4/4] Updating global packages (Bun, npm, pnpm, Pipx, uv)"
   assert_not_contains "$out" "[5/5] Running custom commands"
 }
 

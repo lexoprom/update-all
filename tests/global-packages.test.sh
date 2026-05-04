@@ -78,6 +78,33 @@ EOF
   chmod +x "$bindir/npm"
 }
 
+create_fake_pnpm() {
+  local bindir="$1"
+  cat > "$bindir/pnpm" <<'EOF'
+#!/usr/bin/env bash
+state_file="${FAKE_PNPM_STATE_FILE:-}"
+if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
+  if [[ -n "$state_file" && -f "$state_file" ]]; then
+    cat "$state_file"
+  elif [[ -n "${FAKE_PNPM_LIST_OUTPUT:-}" ]]; then
+    printf '%s\n' "$FAKE_PNPM_LIST_OUTPUT"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "update" && "${2:-}" == "-g" && "${3:-}" == "--latest" ]]; then
+  if [[ -n "${FAKE_PNPM_RECORD_FILE:-}" ]]; then
+    printf 'args=%s\n' "$*" > "$FAKE_PNPM_RECORD_FILE"
+  fi
+  if [[ -n "$state_file" && -n "${FAKE_PNPM_NEXT_LIST_OUTPUT:-}" ]]; then
+    printf '%s\n' "$FAKE_PNPM_NEXT_LIST_OUTPUT" > "$state_file"
+  fi
+  exit "${FAKE_PNPM_UPDATE_EXIT_CODE:-0}"
+fi
+exit 0
+EOF
+  chmod +x "$bindir/pnpm"
+}
+
 create_fake_bun() {
   local bindir="$1"
   cat > "$bindir/bun" <<'EOF'
@@ -162,6 +189,7 @@ run_global_packages() {
 clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
+  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE
   unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
   unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
 }
@@ -207,6 +235,30 @@ test_npm_globals_install_latest_at_boundary() {
   assert_not_contains "$record" "npm@latest"
   assert_contains "$TEST_OUTPUT" "Updating npm globals:"
   assert_contains "$TEST_OUTPUT" "typescript: 5.8.2 → 5.9.0"
+  assert_contains "$TEST_OUTPUT" "@antfu/ni: 24.2.0 → 24.3.0"
+
+  clear_fake_env
+}
+
+test_pnpm_globals_update_latest_at_boundary() {
+  local case_dir="$tmp/pnpm"
+  setup_case "$case_dir"
+  create_fake_pnpm "$case_dir/bin"
+
+  export FAKE_PNPM_STATE_FILE="$case_dir/pnpm-state.txt"
+  export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+  printf '%s\n' 'Legend: production dependency, optional only, dev only' '' '/fake/pnpm/global/5' '│' '│   dependencies:' '├── wrangler@4.73.0' '└── @antfu/ni@24.2.0' '' '2 packages' > "$FAKE_PNPM_STATE_FILE"
+  export FAKE_PNPM_NEXT_LIST_OUTPUT=$'Legend: production dependency, optional only, dev only\n\n/fake/pnpm/global/5\n│\n│   dependencies:\n├── wrangler@4.74.0\n└── @antfu/ni@24.3.0\n\n2 packages'
+
+  run_global_packages "$case_dir" false pnpm
+
+  assert_eq "0" "$TEST_EXIT_CODE" "pnpm exit"
+  assert_eq "✅ Success" "${TEST_RESULT[status.pnpm]}" "pnpm status"
+  local record
+  record="$(< "$case_dir/pnpm-record.txt")"
+  assert_contains "$record" "args=update -g --latest"
+  assert_contains "$TEST_OUTPUT" "Updating pnpm globals..."
+  assert_contains "$TEST_OUTPUT" "wrangler: 4.73.0 → 4.74.0"
   assert_contains "$TEST_OUTPUT" "@antfu/ni: 24.2.0 → 24.3.0"
 
   clear_fake_env
@@ -271,6 +323,7 @@ test_default_run_handles_dry_run_and_missing_managers() {
   assert_eq "0" "$TEST_EXIT_CODE" "dry-run exit"
   assert_eq "⏭️ Not installed" "${TEST_RESULT[status.pipx]}" "pipx skipped"
   assert_eq "🔍 Dry run" "${TEST_RESULT[status.npm]}" "npm dry run"
+  assert_eq "⏭️ Not installed" "${TEST_RESULT[status.pnpm]}" "pnpm skipped"
   assert_eq "⏭️ Not installed" "${TEST_RESULT[status.bun]}" "bun skipped"
   assert_eq "⏭️ Not installed" "${TEST_RESULT[status.uv]}" "uv skipped"
   assert_eq "0" "${TEST_RESULT[failures]}" "failure count"
@@ -280,6 +333,7 @@ test_default_run_handles_dry_run_and_missing_managers() {
   statuses="$(< "$STATUS_FILE")"
   assert_contains "$statuses" $'pipx packages\t⏭️ Not installed'
   assert_contains "$statuses" $'npm global packages\t🔍 Dry run'
+  assert_contains "$statuses" $'pnpm global packages\t⏭️ Not installed'
   assert_contains "$statuses" $'bun global packages\t⏭️ Not installed'
   assert_contains "$statuses" $'uv tools\t⏭️ Not installed'
 
@@ -296,6 +350,7 @@ trap cleanup EXIT
 
 test_pipx_updates_reported_at_boundary
 test_npm_globals_install_latest_at_boundary
+test_pnpm_globals_update_latest_at_boundary
 test_bun_globals_use_temp_dir_at_boundary
 test_uv_tools_upgrade_all_at_boundary
 test_default_run_handles_dry_run_and_missing_managers

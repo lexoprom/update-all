@@ -46,6 +46,13 @@ parse_bun_tree() {
     done
 }
 
+# --- pnpm ---
+
+# pnpm global list uses the same "pkg@version" tree leaves as npm/bun.
+parse_pnpm_tree() {
+    parse_npm_tree "$1"
+}
+
 # --- pipx ---
 
 # Parse pipx upgrade-all output and print colored version diff lines.

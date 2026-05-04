@@ -7,11 +7,12 @@ source "$GLOBAL_PACKAGES_LIB_DIR/pm-helpers.sh"
 declare -grA GLOBAL_PACKAGES_LABELS=(
     [pipx]="pipx packages"
     [npm]="npm global packages"
+    [pnpm]="pnpm global packages"
     [bun]="bun global packages"
     [uv]="uv tools"
 )
 
-declare -gra GLOBAL_PACKAGES_DEFAULT_MANAGERS=(pipx npm bun uv)
+declare -gra GLOBAL_PACKAGES_DEFAULT_MANAGERS=(pipx npm pnpm bun uv)
 
 _global_packages_command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -93,6 +94,30 @@ _global_packages_npm_run() {
         print_version_diff old_versions new_versions
     else
         _global_packages_log_failure "$log_file" "⚠️ npm update failed. Details:"
+        return 1
+    fi
+}
+
+_global_packages_pnpm_installed() { _global_packages_command_exists pnpm; }
+_global_packages_pnpm_run() {
+    local report_dir="$1"
+    local log_file="$report_dir/pnpm_update.log"
+
+    declare -A old_versions=()
+    parse_pnpm_tree old_versions < <(pnpm list -g --depth=0 2>/dev/null)
+
+    if [[ ${#old_versions[@]} -eq 0 ]]; then
+        echo "No global pnpm packages detected."
+        return 0
+    fi
+
+    echo "Updating pnpm globals..."
+    if pnpm update -g --latest > "$log_file" 2>&1; then
+        declare -A new_versions=()
+        parse_pnpm_tree new_versions < <(pnpm list -g --depth=0 2>/dev/null)
+        print_version_diff old_versions new_versions
+    else
+        _global_packages_log_failure "$log_file" "⚠️ pnpm update failed. Details:"
         return 1
     fi
 }
