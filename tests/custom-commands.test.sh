@@ -146,6 +146,23 @@ EOF
   assert_contains "$run_log" $'command 02'
 }
 
+test_custom_commands_stdin_consumers_do_not_skip_next_command() {
+  setup_case "stdin-consumer"
+  local file="$CASE_DIR/commands.txt"
+  declare -A result=()
+
+  cat > "$file" <<EOF
+read maybe || true
+echo ok > "$CASE_DIR/stdin-ok.txt"
+EOF
+
+  custom_commands_run result "$file" "$CASE_DIR/report" false status_sink test_runner > "$CASE_DIR/output.log" 2>&1
+
+  assert_eq "2" "${result[count]}" "command count"
+  assert_eq "0" "${result[failures]}" "failure count"
+  [[ -f "$CASE_DIR/stdin-ok.txt" ]] || fail "stdin-consuming command skipped next command"
+}
+
 test_custom_commands_default_runner_handles_optional_repo_script() {
   setup_case "optional-repo"
   declare -A result=()
@@ -187,6 +204,7 @@ trap cleanup EXIT
 test_custom_commands_should_run_and_disabled_status
 test_custom_commands_dry_run_indexes_and_reports_boundary
 test_custom_commands_failures_do_not_stop_next_boundary
+test_custom_commands_stdin_consumers_do_not_skip_next_command
 test_custom_commands_default_runner_handles_optional_repo_script
 
 echo "PASS"

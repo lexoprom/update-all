@@ -192,6 +192,15 @@ run_global_packages() {
   TEST_OUTPUT="$(printf '%s' "$TEST_OUTPUT" | strip_ansi)"
 }
 
+snapshot_global_packages() {
+  local case_dir="$1"
+  local old_path="$PATH"
+
+  PATH="$case_dir/bin:/usr/bin:/bin"
+  global_packages_snapshot "$case_dir/report"
+  PATH="$old_path"
+}
+
 clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
@@ -242,6 +251,36 @@ test_npm_globals_install_latest_at_boundary() {
   assert_contains "$TEST_OUTPUT" "Updating npm globals:"
   assert_contains "$TEST_OUTPUT" "typescript: 5.8.2 → 5.9.0"
   assert_contains "$TEST_OUTPUT" "@antfu/ni: 24.2.0 → 24.3.0"
+
+  clear_fake_env
+}
+
+test_npm_globals_restore_from_baseline_after_runtime_switch() {
+  local case_dir="$tmp/npm-baseline"
+  setup_case "$case_dir"
+  create_fake_npm "$case_dir/bin"
+
+  export FAKE_NPM_STATE_FILE="$case_dir/npm-state.txt"
+  export FAKE_NPM_RECORD_FILE="$case_dir/npm-record.txt"
+  printf '%s\n' '/old-node/lib' '├── npm@10.9.0' '├── typescript@5.8.2' '└── @earendil-works/pi-coding-agent@0.74.0' > "$FAKE_NPM_STATE_FILE"
+
+  snapshot_global_packages "$case_dir"
+
+  printf '%s\n' '/new-node/lib' '└── npm@11.13.0' > "$FAKE_NPM_STATE_FILE"
+  export FAKE_NPM_NEXT_LIST_OUTPUT=$'/new-node/lib\n├── npm@11.13.0\n├── typescript@5.9.0\n└── @earendil-works/pi-coding-agent@0.75.0'
+
+  run_global_packages "$case_dir" false npm
+
+  assert_eq "0" "$TEST_EXIT_CODE" "npm baseline exit"
+  assert_eq "✅ Success" "${TEST_RESULT[status.npm]}" "npm baseline status"
+  local record
+  record="$(< "$case_dir/npm-record.txt")"
+  assert_contains "$record" "typescript@latest"
+  assert_contains "$record" "@earendil-works/pi-coding-agent@latest"
+  assert_not_contains "$record" "npm@latest"
+  assert_contains "$TEST_OUTPUT" "Restoring npm globals missing after runtime switch:"
+  assert_contains "$TEST_OUTPUT" "typescript"
+  assert_contains "$TEST_OUTPUT" "@earendil-works/pi-coding-agent"
 
   clear_fake_env
 }
@@ -357,6 +396,7 @@ trap cleanup EXIT
 
 test_pipx_updates_reported_at_boundary
 test_npm_globals_install_latest_at_boundary
+test_npm_globals_restore_from_baseline_after_runtime_switch
 test_pnpm_globals_update_latest_at_boundary
 test_bun_globals_use_temp_dir_at_boundary
 test_uv_tools_upgrade_all_at_boundary

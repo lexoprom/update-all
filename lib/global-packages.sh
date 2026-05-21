@@ -13,6 +13,7 @@ declare -grA GLOBAL_PACKAGES_LABELS=(
 )
 
 declare -gra GLOBAL_PACKAGES_DEFAULT_MANAGERS=(pipx npm pnpm bun uv)
+declare -gr GLOBAL_PACKAGES_NPM_BASELINE_FILE="npm_globals.before"
 
 _global_packages_command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -58,6 +59,19 @@ _global_packages_supported() {
         declare -F "_global_packages_${1}_run" >/dev/null
 }
 
+global_packages_snapshot() {
+    local report_dir="$1"
+    local npm_baseline="$report_dir/$GLOBAL_PACKAGES_NPM_BASELINE_FILE"
+
+    [[ -d "$report_dir" ]] || return 0
+    _global_packages_command_exists npm || return 0
+
+    npm list -g --depth=0 > "$npm_baseline" 2>/dev/null || true
+    if [[ ! -s "$npm_baseline" ]]; then
+        rm -f "$npm_baseline"
+    fi
+}
+
 _global_packages_pipx_installed() { _global_packages_command_exists pipx; }
 _global_packages_pipx_run() {
     local report_dir="$1"
@@ -75,9 +89,28 @@ _global_packages_npm_installed() { _global_packages_command_exists npm; }
 _global_packages_npm_run() {
     local report_dir="$1"
     local log_file="$report_dir/npm_install.log"
+    local baseline_file="$report_dir/$GLOBAL_PACKAGES_NPM_BASELINE_FILE"
 
     declare -A old_versions=()
-    parse_npm_tree old_versions < <(npm list -g --depth=0 2>/dev/null)
+    declare -A current_versions=()
+    parse_npm_tree current_versions < <(npm list -g --depth=0 2>/dev/null)
+
+    local name
+    for name in "${!current_versions[@]}"; do
+        old_versions["$name"]="${current_versions[$name]}"
+    done
+
+    local -a missing_from_current=()
+    if [[ -s "$baseline_file" ]]; then
+        declare -A baseline_versions=()
+        parse_npm_tree baseline_versions < "$baseline_file"
+        for name in "${!baseline_versions[@]}"; do
+            if [[ -z "${current_versions[$name]+_}" ]]; then
+                missing_from_current+=("$name")
+            fi
+            old_versions["$name"]="${baseline_versions[$name]}"
+        done
+    fi
 
     local -a packages=()
     readarray -t packages < <(map_to_latest old_versions npm)
@@ -87,6 +120,9 @@ _global_packages_npm_run() {
         return 0
     fi
 
+    if [[ ${#missing_from_current[@]} -gt 0 ]]; then
+        echo "Restoring npm globals missing after runtime switch: ${missing_from_current[*]}"
+    fi
     echo "Updating npm globals: ${packages[*]}"
     if npm install -g "${packages[@]}" > "$log_file" 2>&1; then
         declare -A new_versions=()

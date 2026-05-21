@@ -89,7 +89,7 @@ custom_commands_run() {
 
         [[ $- == *e* ]] && previous_errexit=1 || previous_errexit=0
         set +e
-        "$runner_fn" "$label" "$line"
+        "$runner_fn" "$label" "$line" < /dev/null
         exit_code=$?
         if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
 

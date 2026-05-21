@@ -310,6 +310,7 @@ EOF
     if command_exists mise; then eval "$(mise activate bash)"; fi
     export PATH="$PNPM_HOME:$PATH"
 
+    global_packages_snapshot "$REPORT_DIR"
     configure_tool_runner
     tool_runner_execute "$REPORT_DIR" show_progress
 }
