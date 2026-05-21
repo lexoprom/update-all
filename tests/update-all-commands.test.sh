@@ -88,6 +88,9 @@ fi
 if [[ "${1:-}" == "update" && "${2:-}" == "-g" && "${3:-}" == "--latest" ]]; then
   exit 0
 fi
+if [[ "${1:-}" == "approve-builds" && "${2:-}" == "-g" && "${3:-}" == "--all" ]]; then
+  exit 0
+fi
 exit 0
 EOF
 

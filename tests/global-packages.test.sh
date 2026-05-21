@@ -93,12 +93,18 @@ if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
 fi
 if [[ "${1:-}" == "update" && "${2:-}" == "-g" && "${3:-}" == "--latest" ]]; then
   if [[ -n "${FAKE_PNPM_RECORD_FILE:-}" ]]; then
-    printf 'args=%s\n' "$*" > "$FAKE_PNPM_RECORD_FILE"
+    printf 'args=%s\n' "$*" >> "$FAKE_PNPM_RECORD_FILE"
   fi
   if [[ -n "$state_file" && -n "${FAKE_PNPM_NEXT_LIST_OUTPUT:-}" ]]; then
     printf '%s\n' "$FAKE_PNPM_NEXT_LIST_OUTPUT" > "$state_file"
   fi
   exit "${FAKE_PNPM_UPDATE_EXIT_CODE:-0}"
+fi
+if [[ "${1:-}" == "approve-builds" && "${2:-}" == "-g" && "${3:-}" == "--all" ]]; then
+  if [[ -n "${FAKE_PNPM_RECORD_FILE:-}" ]]; then
+    printf 'args=%s\n' "$*" >> "$FAKE_PNPM_RECORD_FILE"
+  fi
+  exit "${FAKE_PNPM_APPROVE_EXIT_CODE:-0}"
 fi
 exit 0
 EOF
@@ -189,7 +195,7 @@ run_global_packages() {
 clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
-  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE
+  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE
   unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
   unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
 }
@@ -257,6 +263,7 @@ test_pnpm_globals_update_latest_at_boundary() {
   local record
   record="$(< "$case_dir/pnpm-record.txt")"
   assert_contains "$record" "args=update -g --latest"
+  assert_contains "$record" "args=approve-builds -g --all"
   assert_contains "$TEST_OUTPUT" "Updating pnpm globals..."
   assert_contains "$TEST_OUTPUT" "wrangler: 4.73.0 → 4.74.0"
   assert_contains "$TEST_OUTPUT" "@antfu/ni: 24.2.0 → 24.3.0"

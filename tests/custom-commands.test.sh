@@ -149,11 +149,17 @@ EOF
 test_custom_commands_default_runner_handles_optional_repo_script() {
   setup_case "optional-repo"
   declare -A result=()
+  local file="$CASE_DIR/commands.txt"
+
+  cat > "$file" <<'EOF'
+if [[ -d "$HOME/.codex/superpowers" || -d "$HOME/.codex/.superpowers.disable" ]]; then cd "$HOME/.codex/superpowers" 2>/dev/null || cd "$HOME/.codex/.superpowers.disable"; git pull; else echo 'Skipping ~/.codex/superpowers: repo not present'; fi
+if [[ -d "$HOME/.agents/skills/pi-skills" || -d "$HOME/.agents/skills/.pi-skills.disable" ]]; then cd "$HOME/.agents/skills/pi-skills" 2>/dev/null || cd "$HOME/.agents/skills/.pi-skills.disable"; git pull; else echo 'Skipping ~/.agents/skills/pi-skills: repo not present'; fi
+EOF
 
   local old_home="$HOME"
   HOME="$CASE_DIR/home"
   set +e
-  custom_commands_run result "$SCRIPT_DIR/update-all.commands" "$CASE_DIR/report" false status_sink > "$CASE_DIR/output.log" 2>&1
+  custom_commands_run result "$file" "$CASE_DIR/report" false status_sink > "$CASE_DIR/output.log" 2>&1
   local exit_code=$?
   set -e
   HOME="$old_home"

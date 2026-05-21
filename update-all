@@ -305,8 +305,10 @@ EOF
     # 1. SETUP PHASE
     acquire_lock
     cd "$HOME"
-    export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH"
+    export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
+    export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
     if command_exists mise; then eval "$(mise activate bash)"; fi
+    export PATH="$PNPM_HOME:$PATH"
 
     configure_tool_runner
     tool_runner_execute "$REPORT_DIR" show_progress

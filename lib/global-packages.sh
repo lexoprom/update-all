@@ -112,7 +112,8 @@ _global_packages_pnpm_run() {
     fi
 
     echo "Updating pnpm globals..."
-    if pnpm update -g --latest > "$log_file" 2>&1; then
+    if pnpm update -g --latest > "$log_file" 2>&1 &&
+        pnpm approve-builds -g --all >> "$log_file" 2>&1; then
         declare -A new_versions=()
         parse_pnpm_tree new_versions < <(pnpm list -g --depth=0 2>/dev/null)
         print_version_diff old_versions new_versions
