@@ -1,7 +1,9 @@
 # Custom commands run after the standard updates.
 # One command per line. Blank lines and lines starting with # are ignored.
 
-pi update
+# pi itself is already covered by the npm global package update step.
+# Avoid running `pi update` here: it self-updates the CLI and can stall this script
+# while update-all is still executing. Only refresh pi-managed extensions.
 pi update --extensions
 
 # if [[ -d "$HOME/.codex/superpowers" || -d "$HOME/.codex/.superpowers.disable" ]]; then cd "$HOME/.codex/superpowers" 2>/dev/null || cd "$HOME/.codex/.superpowers.disable"; git pull; else echo 'Skipping ~/.codex/superpowers: repo not present'; fi
