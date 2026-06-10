@@ -40,9 +40,12 @@ custom_commands_should_run() {
 custom_commands_handle_disabled() {
     local skip_commands="$1"
     local status_sink="${2:-}"
+    local file="${3:-}"
 
     if [[ "$skip_commands" = true ]]; then
         _custom_commands_emit_status "$status_sink" "custom commands" "⏭️ Skipped"
+    elif [[ -n "$file" && -f "$file" ]]; then
+        _custom_commands_emit_status "$status_sink" "custom commands" "⏭️ No commands"
     else
         _custom_commands_emit_status "$status_sink" "custom commands" "⏭️ No commands file"
     fi

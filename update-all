@@ -244,7 +244,7 @@ custom_commands_tool_enabled() {
     custom_commands_should_run "$SKIP_COMMANDS" "$COMMANDS_FILE"
 }
 custom_commands_tool_disabled() {
-    custom_commands_handle_disabled "$SKIP_COMMANDS" log_status
+    custom_commands_handle_disabled "$SKIP_COMMANDS" log_status "$COMMANDS_FILE"
 }
 custom_commands_tool_components() { printf '%s\n' "custom commands"; }
 

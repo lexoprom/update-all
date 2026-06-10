@@ -61,21 +61,28 @@ setup_case() {
 test_custom_commands_should_run_and_disabled_status() {
   setup_case "enabled"
   local file="$CASE_DIR/commands.txt"
+  local empty_file="$CASE_DIR/empty.commands"
 
   cat > "$file" <<'EOF'
 # comment
 
 echo one
 EOF
+  cat > "$empty_file" <<'EOF'
+# comment only
+
+EOF
 
   custom_commands_should_run false "$file"
   custom_commands_handle_disabled true status_sink
   custom_commands_handle_disabled false status_sink
+  custom_commands_handle_disabled false status_sink "$empty_file"
 
   local statuses
   statuses="$(< "$STATUS_FILE")"
   assert_contains "$statuses" $'custom commands\t⏭️ Skipped'
   assert_contains "$statuses" $'custom commands\t⏭️ No commands file'
+  assert_contains "$statuses" $'custom commands\t⏭️ No commands'
 }
 
 test_custom_commands_dry_run_indexes_and_reports_boundary() {
