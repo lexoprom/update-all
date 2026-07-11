@@ -99,8 +99,9 @@ EOF
   tool_runner_register "d" "post" "Tool D step" post_enabled post_run post_components
   tool_runner_register "disabled" "post" "Disabled step" disabled_post_enabled disabled_post_run disabled_post_components disabled_post_disabled
 
-  local out
-  out="$(tool_runner_execute "$REPORT_DIR" progress_sink | strip_ansi)"
+  local raw_out out
+  raw_out="$(tool_runner_execute "$REPORT_DIR" progress_sink)"
+  out="$(printf '%s' "$raw_out" | strip_ansi)"
 
   local progress
   progress="$(< "$CASE_DIR/progress.log")"
@@ -124,10 +125,20 @@ EOF
   assert_contains "$out" "Tool C"
   assert_contains "$out" "Tool D"
   assert_contains "$out" "custom commands"
-  assert_contains "$out" "Custom commands"
-  assert_contains "$out" "•  echo one"
-  assert_contains "$out" "•  echo two"
-  assert_contains "$out" "5 items · all done · 1 skipped"
+  assert_contains "$out" "·  echo one"
+  assert_contains "$out" "·  echo two"
+  assert_contains "$raw_out" $'\033[2m·  echo one\033[0m'
+  if printf '%s\n' "$out" | grep -F 'items · all done' >/dev/null; then
+    fail "redundant aggregate success line"
+  fi
+  if printf '%s\n' "$out" | grep -Fx 'Custom commands' >/dev/null; then
+    fail "redundant custom commands heading"
+  fi
+
+  local commands_line summary_line
+  commands_line="$(printf '%s\n' "$out" | grep -n '·  echo one' | cut -d: -f1)"
+  summary_line="$(printf '%s\n' "$out" | grep -n '^Summary$' | cut -d: -f1)"
+  [[ "$commands_line" -lt "$summary_line" ]] || fail "summary should follow the command list"
 }
 
 tmp="$(mktemp -d)"

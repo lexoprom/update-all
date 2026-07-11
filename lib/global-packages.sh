@@ -42,6 +42,21 @@ _global_packages_log_failure() {
     cat "$log_file"
 }
 
+_global_packages_print_info() {
+    local output_file="$1"
+    local dim="${DIM:-\033[2m}"
+    local nc="${NC:-\033[0m}"
+    local line
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$line" ]]; then
+            printf '  %b·  %s%b\n' "$dim" "$line" "$nc"
+        else
+            printf '\n'
+        fi
+    done < "$output_file"
+}
+
 _global_packages_set_status() {
     local -n status_result="$1"
     local pm="$2"
@@ -271,7 +286,6 @@ global_packages_run() {
     done
 
     if [[ ${#pending[@]} -gt 0 ]]; then
-        echo "Waiting for package managers..."
         for entry in "${pending[@]}"; do
             pid="${entry##*:}"
             wait "$pid"
@@ -285,7 +299,11 @@ global_packages_run() {
         results_map["status.$pm"]="$status"
 
         if [[ -s "$state_dir/$pm.output" ]]; then
-            cat "$state_dir/$pm.output"
+            if [[ "$status" == "✅ Success" ]]; then
+                _global_packages_print_info "$state_dir/$pm.output"
+            else
+                cat "$state_dir/$pm.output"
+            fi
         fi
 
         _global_packages_emit_status "$status_sink" "$label" "$status"

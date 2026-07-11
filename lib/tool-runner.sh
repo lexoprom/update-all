@@ -174,10 +174,8 @@ tool_runner_generate_summary() {
     local report_dir="$1"
     local commands_index="${2:-$report_dir/commands.index}"
     local yellow="${YELLOW:-\033[0;33m}"
-    local green="${GREEN:-\033[0;32m}"
     local blue="${BLUE:-\033[0;34m}"
     local red="${RED:-\033[0;31m}"
-    local cyan="${CYAN:-\033[0;36m}"
     local bold="${BOLD:-\033[1m}"
     local dim="${DIM:-\033[2m}"
     local nc="${NC:-\033[0m}"
@@ -190,6 +188,14 @@ tool_runner_generate_summary() {
             [[ -z "${component// }" ]] && continue
             status["$component"]="$state"
         done < "$report_dir/status.log"
+    fi
+
+    if [[ -f "$commands_index" ]]; then
+        printf '\n'
+        while IFS=$'\t' read -r _ cmd; do
+            [[ -z "${cmd:-}" ]] && continue
+            printf '  %b·  %s%b\n' "$dim" "$cmd" "$nc"
+        done < "$commands_index"
     fi
 
     printf '\n%bSummary%b\n' "$bold" "$nc"
@@ -211,24 +217,17 @@ tool_runner_generate_summary() {
         done < <(_tool_runner_call_if_defined "$components_fn" || true)
     done
 
-    if [[ -f "$commands_index" ]]; then
-        printf '\n%bCustom commands%b\n' "$bold" "$nc"
-        while IFS=$'\t' read -r _ cmd; do
-            [[ -z "${cmd:-}" ]] && continue
-            printf '  %b•%b  %s\n' "$cyan" "$nc" "$cmd"
-        done < "$commands_index"
-    fi
-
     printf '%b────────────────────────────────────────────%b\n' "$dim" "$nc"
     if [[ $failed -gt 0 ]]; then
         printf '%b%d items · %d failed%b' "$red" "$shown" "$failed" "$nc"
+        [[ $skipped -gt 0 ]] && printf '%b · %d skipped%b' "$dim" "$skipped" "$nc"
+        printf '\n'
     elif [[ $simulated -gt 0 ]]; then
         printf '%b%d items · %d simulated%b' "$yellow" "$shown" "$simulated" "$nc"
-    else
-        printf '%b%d items · all done%b' "$green" "$shown" "$nc"
+        [[ $skipped -gt 0 ]] && printf '%b · %d skipped%b' "$dim" "$skipped" "$nc"
+        printf '\n'
     fi
-    [[ $skipped -gt 0 ]] && printf '%b · %d skipped%b' "$dim" "$skipped" "$nc"
-    printf '\n%bFinished %s%b\n' "$dim" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$nc"
+    printf '%bFinished %s%b\n' "$dim" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$nc"
 }
 
 tool_runner_execute() {

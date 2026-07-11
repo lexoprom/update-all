@@ -188,8 +188,8 @@ run_global_packages() {
   set -e
 
   PATH="$old_path"
-  TEST_OUTPUT="$(< "$case_dir/output.log")"
-  TEST_OUTPUT="$(printf '%s' "$TEST_OUTPUT" | strip_ansi)"
+  TEST_RAW_OUTPUT="$(< "$case_dir/output.log")"
+  TEST_OUTPUT="$(printf '%s' "$TEST_RAW_OUTPUT" | strip_ansi)"
 }
 
 snapshot_global_packages() {
@@ -220,6 +220,8 @@ test_pipx_updates_reported_at_boundary() {
 
   assert_eq "0" "$TEST_EXIT_CODE" "pipx exit"
   assert_eq "✅ Success" "${TEST_RESULT[status.pipx]}" "pipx status"
+  assert_not_contains "$TEST_OUTPUT" "Waiting for package"
+  assert_contains "$TEST_RAW_OUTPUT" $'\033[2m·  Updated 2 pipx package(s).'
   assert_contains "$TEST_OUTPUT" "black: 24.1.0 → 24.2.0"
   assert_contains "$TEST_OUTPUT" "flake8: 7.0.0 → 7.1.0"
   assert_contains "$TEST_OUTPUT" "Updated 2 pipx package(s)."
