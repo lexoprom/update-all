@@ -117,16 +117,17 @@ EOF
   assert_contains "$statuses" $'Tool D\t✅ Success'
   assert_contains "$statuses" $'custom commands\t⏭️ Skipped'
 
-  assert_contains "$out" "...waiting phase1..."
-  assert_contains "$out" "...waiting phase2..."
-  assert_contains "$out" "Tool A:"
-  assert_contains "$out" "Tool B:"
-  assert_contains "$out" "Tool C:"
-  assert_contains "$out" "Tool D:"
-  assert_contains "$out" "custom commands:"
+  assert_contains "$out" "·  ...waiting phase1..."
+  assert_contains "$out" "·  ...waiting phase2..."
+  assert_contains "$out" "Tool A"
+  assert_contains "$out" "Tool B"
+  assert_contains "$out" "Tool C"
+  assert_contains "$out" "Tool D"
+  assert_contains "$out" "custom commands"
   assert_contains "$out" "Custom commands"
-  assert_contains "$out" "- echo one"
-  assert_contains "$out" "- echo two"
+  assert_contains "$out" "•  echo one"
+  assert_contains "$out" "•  echo two"
+  assert_contains "$out" "5 items · all done · 1 skipped"
 }
 
 tmp="$(mktemp -d)"

@@ -84,6 +84,8 @@ readonly YELLOW='\033[0;33m'
 readonly BLUE='\033[0;34m'
 readonly RED='\033[0;31m'
 readonly CYAN='\033[0;36m'
+readonly BOLD='\033[1m'
+readonly DIM='\033[2m'
 readonly NC='\033[0m'
 
 # Cleanup on exit
@@ -107,7 +109,7 @@ show_progress() {
     local current="$1"
     local total="$2"
     local label="$3"
-    echo -e "${BLUE}[$current/$total] $label${NC}"
+    printf '\n%b%2s/%s%b  %b%s%b\n' "$BLUE" "$current" "$total" "$NC" "$BOLD" "$label" "$NC"
 }
 
 log_status() {
@@ -122,12 +124,12 @@ safe_execute() {
     local description="$1"
     shift
     if [[ "$DRY_RUN" = true ]]; then
-        echo -e "${CYAN}[DRY RUN] Would execute: $*${NC}"
+        printf '  %b↳%b  Would execute: %s\n' "$CYAN" "$NC" "$*"
         log_status "$description" "🔍 Dry run"
         return 0
     fi
 
-    [[ "$VERBOSE" = true ]] && echo -e "${CYAN}Executing: $*${NC}"
+    [[ "$VERBOSE" = true ]] && printf '  %b↳%b  Executing: %s\n' "$CYAN" "$NC" "$*"
 
     local output exit_code
     local previous_errexit=0
@@ -140,15 +142,15 @@ safe_execute() {
 
     if [[ $exit_code -eq 0 ]]; then
         log_status "$description" "✅ Success"
-        [[ "$VERBOSE" = true ]] && echo -e "${GREEN}✅ $description completed${NC}"
+        [[ "$VERBOSE" = true ]] && printf '  %b✓%b  %s completed\n' "$GREEN" "$NC" "$description"
     else
         log_status "$description" "❌ Failed (exit code: $exit_code)"
-        echo -e "${RED}❌ $description failed with exit code $exit_code${NC}"
+        printf '  %b✗%b  %s failed (exit code %s)\n' "$RED" "$NC" "$description" "$exit_code"
         local cmd_str="$*"
-        echo -e "${CYAN}Command:${NC} $cmd_str"
+        printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$cmd_str"
         if [[ -n "$output" ]]; then
             while IFS= read -r line; do
-                echo "[$cmd_str] $line"
+                printf '     %s\n' "$line"
             done <<< "$output"
         fi
     fi
@@ -250,8 +252,8 @@ custom_commands_tool_components() { printf '%s\n' "custom commands"; }
 
 configure_tool_runner() {
     tool_runner_reset
-    tool_runner_define_phase "phase1" "parallel" "...Waiting for System & Runtime updates to finish..."
-    tool_runner_define_phase "phase2" "parallel" "...Waiting for Package updates to finish..."
+    tool_runner_define_phase "phase1" "parallel" "Waiting for system and runtime updates…"
+    tool_runner_define_phase "phase2" "parallel" "Waiting for package updates…"
     tool_runner_define_phase "post" "serial"
 
     tool_runner_register "homebrew" "phase1" "Updating Homebrew" \
@@ -270,7 +272,6 @@ configure_tool_runner() {
 
 main() {
     set +e
-    echo -e "${CYAN}Starting Universal System & Tool Updater (Final Robust)...${NC}"
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -301,6 +302,13 @@ EOF
         esac
         shift
     done
+
+    printf '\n%bUpdate all%b\n' "$BOLD" "$NC"
+    if [[ "$DRY_RUN" = true ]]; then
+        printf '%bSystem and developer tools · dry run%b\n' "$DIM" "$NC"
+    else
+        printf '%bSystem and developer tools%b\n' "$DIM" "$NC"
+    fi
 
     # 1. SETUP PHASE
     acquire_lock

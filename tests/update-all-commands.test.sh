@@ -191,7 +191,7 @@ EOF
   out="$(run_case "$case_dir" --dry-run --skip-commands)"
 
   assert_not_contains "$out" "Would execute: echo should-not-run"
-  assert_contains "$out" "custom commands:"
+  assert_contains "$out" "custom commands"
   assert_contains "$out" "Skipped"
 }
 
@@ -205,7 +205,7 @@ EOF
   local out
   out="$(run_case "$case_dir" --dry-run)"
 
-  assert_contains "$out" "[5/5] Running custom commands"
+  assert_contains "$out" "5/5  Running custom commands"
 }
 
 test_step_count_excludes_disabled_custom_commands() {
@@ -218,8 +218,8 @@ EOF
   local out
   out="$(run_case "$case_dir" --dry-run --skip-commands)"
 
-  assert_contains "$out" "[4/4] Updating global packages (Bun, npm, pnpm, Pipx, uv)"
-  assert_not_contains "$out" "[5/5] Running custom commands"
+  assert_contains "$out" "4/4  Updating global packages (Bun, npm, pnpm, Pipx, uv)"
+  assert_not_contains "$out" "5/5  Running custom commands"
 }
 
 tmp="$(mktemp -d)"

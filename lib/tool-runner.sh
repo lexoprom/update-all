@@ -128,7 +128,7 @@ _tool_runner_run_parallel_phase() {
     local id
     local label
     local wait_message="${TOOL_RUNNER_PHASE_WAIT_MESSAGES[$phase]-}"
-    local blue="${BLUE:-\033[0;34m}"
+    local dim="${DIM:-\033[2m}"
     local nc="${NC:-\033[0m}"
 
     for id in "${TOOL_RUNNER_IDS[@]}"; do
@@ -144,7 +144,7 @@ _tool_runner_run_parallel_phase() {
     done
 
     if [[ ${#jobs[@]} -gt 0 ]]; then
-        [[ -n "$wait_message" ]] && echo -e "${blue}${wait_message}${nc}"
+        [[ -n "$wait_message" ]] && printf '  %b·  %s%b\n' "$dim" "$wait_message" "$nc"
         _tool_runner_wait_for_jobs "${jobs[@]}"
     fi
 }
@@ -176,10 +176,14 @@ tool_runner_generate_summary() {
     local yellow="${YELLOW:-\033[0;33m}"
     local green="${GREEN:-\033[0;32m}"
     local blue="${BLUE:-\033[0;34m}"
+    local red="${RED:-\033[0;31m}"
     local cyan="${CYAN:-\033[0;36m}"
+    local bold="${BOLD:-\033[1m}"
+    local dim="${DIM:-\033[2m}"
     local nc="${NC:-\033[0m}"
     declare -A status=()
     local id component components_fn
+    local shown=0 failed=0 skipped=0 simulated=0
 
     if [[ -f "$report_dir/status.log" ]]; then
         while IFS=$'\t' read -r component state; do
@@ -188,29 +192,43 @@ tool_runner_generate_summary() {
         done < "$report_dir/status.log"
     fi
 
-    echo -e "\n${yellow}=======================================================${nc}"
-    echo -e "${green}Update Summary Report${nc}"
-    echo -e "${yellow}=======================================================${nc}\n"
+    printf '\n%bSummary%b\n' "$bold" "$nc"
+    printf '%b────────────────────────────────────────────%b\n' "$dim" "$nc"
 
     for id in "${TOOL_RUNNER_IDS[@]}"; do
         components_fn="${TOOL_RUNNER_COMPONENTS_FNS[$id]-}"
         while IFS= read -r component; do
             [[ -z "${component:-}" ]] && continue
             if [[ -n "${status[$component]+_}" ]]; then
-                printf "${blue}%-45s${nc} %s\n" "$component:" "${status[$component]}"
+                shown=$((shown + 1))
+                case "${status[$component]}" in
+                    *Failed*) failed=$((failed + 1)) ;;
+                    *Skipped*|*"Not installed"*|*"No commands"*) skipped=$((skipped + 1)) ;;
+                    *"Dry run"*) simulated=$((simulated + 1)) ;;
+                esac
+                printf '  %b%-28s%b %s\n' "$blue" "$component" "$nc" "${status[$component]}"
             fi
         done < <(_tool_runner_call_if_defined "$components_fn" || true)
     done
 
     if [[ -f "$commands_index" ]]; then
-        echo -e "\n${green}Custom commands${nc}"
+        printf '\n%bCustom commands%b\n' "$bold" "$nc"
         while IFS=$'\t' read -r _ cmd; do
             [[ -z "${cmd:-}" ]] && continue
-            echo -e "${cyan}- $cmd${nc}"
+            printf '  %b•%b  %s\n' "$cyan" "$nc" "$cmd"
         done < "$commands_index"
     fi
 
-    echo -e "\n${cyan}Completed on: $(date)${nc}"
+    printf '%b────────────────────────────────────────────%b\n' "$dim" "$nc"
+    if [[ $failed -gt 0 ]]; then
+        printf '%b%d items · %d failed%b' "$red" "$shown" "$failed" "$nc"
+    elif [[ $simulated -gt 0 ]]; then
+        printf '%b%d items · %d simulated%b' "$yellow" "$shown" "$simulated" "$nc"
+    else
+        printf '%b%d items · all done%b' "$green" "$shown" "$nc"
+    fi
+    [[ $skipped -gt 0 ]] && printf '%b · %d skipped%b' "$dim" "$skipped" "$nc"
+    printf '\n%bFinished %s%b\n' "$dim" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$nc"
 }
 
 tool_runner_execute() {
