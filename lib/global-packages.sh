@@ -162,8 +162,16 @@ _global_packages_pnpm_run() {
         return 0
     fi
 
-    echo "Updating pnpm globals..."
-    if pnpm update -g --latest > "$log_file" 2>&1 &&
+    local -a packages=()
+    readarray -t packages < <(map_to_latest old_versions pnpm @pnpm/exe)
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        echo "No global pnpm packages to update."
+        return 0
+    fi
+
+    echo "Updating pnpm globals: ${packages[*]}"
+    if pnpm update -g --latest "${packages[@]}" > "$log_file" 2>&1 &&
         pnpm approve-builds -g --all >> "$log_file" 2>&1; then
         declare -A new_versions=()
         parse_pnpm_tree new_versions < <(pnpm list -g --depth=0 2>/dev/null)

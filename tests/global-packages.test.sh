@@ -294,8 +294,8 @@ test_pnpm_globals_update_latest_at_boundary() {
 
   export FAKE_PNPM_STATE_FILE="$case_dir/pnpm-state.txt"
   export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
-  printf '%s\n' 'Legend: production dependency, optional only, dev only' '' '/fake/pnpm/global/5' '│' '│   dependencies:' '├── wrangler@4.73.0' '└── @antfu/ni@24.2.0' '' '2 packages' > "$FAKE_PNPM_STATE_FILE"
-  export FAKE_PNPM_NEXT_LIST_OUTPUT=$'Legend: production dependency, optional only, dev only\n\n/fake/pnpm/global/5\n│\n│   dependencies:\n├── wrangler@4.74.0\n└── @antfu/ni@24.3.0\n\n2 packages'
+  printf '%s\n' 'Legend: production dependency, optional only, dev only' '' '/fake/pnpm/global/5' '│' '│   dependencies:' '├── @pnpm/exe@10.18.0' '├── wrangler@4.73.0' '└── @antfu/ni@24.2.0' '' '3 packages' > "$FAKE_PNPM_STATE_FILE"
+  export FAKE_PNPM_NEXT_LIST_OUTPUT=$'Legend: production dependency, optional only, dev only\n\n/fake/pnpm/global/5\n│\n│   dependencies:\n├── @pnpm/exe@10.18.0\n├── wrangler@4.74.0\n└── @antfu/ni@24.3.0\n\n3 packages'
 
   run_global_packages "$case_dir" false pnpm
 
@@ -304,10 +304,33 @@ test_pnpm_globals_update_latest_at_boundary() {
   local record
   record="$(< "$case_dir/pnpm-record.txt")"
   assert_contains "$record" "args=update -g --latest"
+  assert_contains "$record" "wrangler@latest"
+  assert_contains "$record" "@antfu/ni@latest"
+  assert_not_contains "$record" "@pnpm/exe@latest"
+  assert_not_contains "$record" "pnpm@latest"
   assert_contains "$record" "args=approve-builds -g --all"
-  assert_contains "$TEST_OUTPUT" "Updating pnpm globals..."
+  assert_contains "$TEST_OUTPUT" "Updating pnpm globals:"
   assert_contains "$TEST_OUTPUT" "wrangler: 4.73.0 → 4.74.0"
   assert_contains "$TEST_OUTPUT" "@antfu/ni: 24.2.0 → 24.3.0"
+
+  clear_fake_env
+}
+
+test_pnpm_globals_manager_only_reports_nothing_to_update() {
+  local case_dir="$tmp/pnpm-manager-only"
+  setup_case "$case_dir"
+  create_fake_pnpm "$case_dir/bin"
+
+  export FAKE_PNPM_STATE_FILE="$case_dir/pnpm-state.txt"
+  export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+  printf '%s\n' 'Legend: production dependency, optional only, dev only' '' '/fake/pnpm/global/5' '│' '│   dependencies:' '├── @pnpm/exe@10.18.0' '└── pnpm@10.18.0' '' '2 packages' > "$FAKE_PNPM_STATE_FILE"
+
+  run_global_packages "$case_dir" false pnpm
+
+  assert_eq "0" "$TEST_EXIT_CODE" "pnpm manager-only exit"
+  assert_eq "✅ Success" "${TEST_RESULT[status.pnpm]}" "pnpm manager-only status"
+  assert_contains "$TEST_OUTPUT" "No global pnpm packages to update."
+  [[ ! -f "$case_dir/pnpm-record.txt" ]] || fail "unexpected pnpm command recorded"
 
   clear_fake_env
 }
@@ -400,6 +423,7 @@ test_pipx_updates_reported_at_boundary
 test_npm_globals_install_latest_at_boundary
 test_npm_globals_restore_from_baseline_after_runtime_switch
 test_pnpm_globals_update_latest_at_boundary
+test_pnpm_globals_manager_only_reports_nothing_to_update
 test_bun_globals_use_temp_dir_at_boundary
 test_uv_tools_upgrade_all_at_boundary
 test_default_run_handles_dry_run_and_missing_managers
