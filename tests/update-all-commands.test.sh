@@ -222,6 +222,34 @@ EOF
   assert_not_contains "$out" "5/5  Running custom commands"
 }
 
+test_default_commands_file_pnpm_recovery_command() {
+  # The repo's default commands file must repair pnpm without depending on the
+  # local `pnpm` binary and without being diverted by a project packageManager
+  # pin. The active recovery line must:
+  #   - not start with bare `pnpm self-update` (can't recover a broken launcher);
+  #   - contain `npx --yes pnpm@latest-11 self-update` (npm/npx-backed); and
+  #   - contain `pnpm_config_pm_on_fail=ignore` (skip project pnpm pins).
+  local file="./update-all.commands"
+  [[ -f "$file" ]] || fail "update-all.commands missing"
+
+  local line trimmed recovery=""
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+    if [[ "$trimmed" == *"self-update"* ]]; then
+      [[ -n "$recovery" ]] && fail "multiple active self-update lines: $recovery / $trimmed"
+      recovery="$trimmed"
+    fi
+  done < "$file"
+
+  [[ -n "$recovery" ]] || fail "no active pnpm self-update recovery command found"
+  if [[ "$recovery" == "pnpm self-update"* ]]; then
+    fail "active pnpm self-update command is still bare: $recovery"
+  fi
+  assert_contains "$recovery" "npx --yes pnpm@latest-11 self-update"
+  assert_contains "$recovery" "pnpm_config_pm_on_fail=ignore"
+}
+
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 cleanup() { rm -rf "$tmp"; }
@@ -232,5 +260,6 @@ test_commands_file_override
 test_skip_commands
 test_step_count_includes_enabled_custom_commands
 test_step_count_excludes_disabled_custom_commands
+test_default_commands_file_pnpm_recovery_command
 
 echo "PASS"

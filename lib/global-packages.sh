@@ -153,9 +153,19 @@ _global_packages_pnpm_installed() { _global_packages_command_exists pnpm; }
 _global_packages_pnpm_run() {
     local report_dir="$1"
     local log_file="$report_dir/pnpm_update.log"
+    local before_list="$report_dir/pnpm_list_before.txt"
+    local before_err="$report_dir/pnpm_list_before.err"
+
+    # Capture list output and stderr explicitly. A broken pnpm launcher exits
+    # non-zero; treating that as an empty parse would falsely report "No global
+    # pnpm packages detected." Surface it as a real failure instead.
+    if ! pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
+        _global_packages_log_failure "$before_err" "⚠️ pnpm global package list failed. Details:"
+        return 1
+    fi
 
     declare -A old_versions=()
-    parse_pnpm_tree old_versions < <(pnpm list -g --depth=0 2>/dev/null)
+    parse_pnpm_tree old_versions < "$before_list"
 
     if [[ ${#old_versions[@]} -eq 0 ]]; then
         echo "No global pnpm packages detected."
@@ -177,8 +187,16 @@ _global_packages_pnpm_run() {
     echo "Updating pnpm globals: ${packages[*]}"
     if pnpm update -g --latest "${packages[@]}" > "$log_file" 2>&1 &&
         pnpm approve-builds -g --all >> "$log_file" 2>&1; then
+        local after_list="$report_dir/pnpm_list_after.txt"
+        local after_err="$report_dir/pnpm_list_after.err"
+        # Re-check the post-update list too: a pnpm failure here must not be
+        # silently read as "no version changes".
+        if ! pnpm list -g --depth=0 > "$after_list" 2> "$after_err"; then
+            _global_packages_log_failure "$after_err" "⚠️ pnpm global package list failed after update. Details:"
+            return 1
+        fi
         declare -A new_versions=()
-        parse_pnpm_tree new_versions < <(pnpm list -g --depth=0 2>/dev/null)
+        parse_pnpm_tree new_versions < "$after_list"
         print_version_diff old_versions new_versions
     else
         _global_packages_log_failure "$log_file" "⚠️ pnpm update failed. Details:"

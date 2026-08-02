@@ -22,6 +22,15 @@ assert_eq() {
   fi
 }
 
+assert_ne() {
+  local unexpected="$1"
+  local actual="$2"
+  local label="${3:-value}"
+  if [[ "$unexpected" == "$actual" ]]; then
+    fail "$label: expected not [$unexpected], got [$actual]"
+  fi
+}
+
 assert_contains() {
   local haystack="$1"
   local needle="$2"
@@ -83,7 +92,17 @@ create_fake_pnpm() {
   cat > "$bindir/pnpm" <<'EOF'
 #!/usr/bin/env bash
 state_file="${FAKE_PNPM_STATE_FILE:-}"
+count_file="${FAKE_PNPM_LIST_COUNT_FILE:-}"
 if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
+  if [[ -n "$count_file" ]]; then
+    n=1
+    [[ -f "$count_file" ]] && n=$(( $(< "$count_file") + 1 ))
+    printf '%s\n' "$n" > "$count_file"
+    if [[ -n "${FAKE_PNPM_LIST_FAIL_AT:-}" && "$n" -ge "${FAKE_PNPM_LIST_FAIL_AT}" ]]; then
+      printf '%s\n' '/home/user/.local/share/pnpm/pnpm: line 2: exec: node: not found' >&2
+      exit 1
+    fi
+  fi
   if [[ -n "$state_file" && -f "$state_file" ]]; then
     cat "$state_file"
   elif [[ -n "${FAKE_PNPM_LIST_OUTPUT:-}" ]]; then
@@ -210,7 +229,7 @@ snapshot_global_packages() {
 clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
-  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE
+  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE FAKE_PNPM_LIST_COUNT_FILE FAKE_PNPM_LIST_FAIL_AT
   unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
   unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
 }
@@ -343,6 +362,53 @@ test_pnpm_globals_manager_only_reports_nothing_to_update() {
   clear_fake_env
 }
 
+test_pnpm_globals_fail_when_initial_list_fails() {
+  local case_dir="$tmp/pnpm-initial-fail"
+  setup_case "$case_dir"
+  create_fake_pnpm "$case_dir/bin"
+
+  export FAKE_PNPM_LIST_COUNT_FILE="$case_dir/pnpm-list-count.txt"
+  export FAKE_PNPM_LIST_FAIL_AT=1
+  export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+
+  run_global_packages "$case_dir" false pnpm
+
+  assert_ne "0" "$TEST_EXIT_CODE" "pnpm initial-list-fail exit"
+  assert_eq "❌ Failed" "${TEST_RESULT[status.pnpm]}" "pnpm initial-list-fail status"
+  assert_not_contains "$TEST_OUTPUT" "No global pnpm packages detected."
+  assert_contains "$TEST_OUTPUT" "pnpm global package list failed"
+  assert_contains "$TEST_OUTPUT" "node: not found"
+  [[ ! -f "$case_dir/pnpm-record.txt" ]] || fail "pnpm update ran despite failed initial list"
+
+  clear_fake_env
+}
+
+test_pnpm_globals_fail_when_post_update_list_fails() {
+  local case_dir="$tmp/pnpm-post-fail"
+  setup_case "$case_dir"
+  create_fake_pnpm "$case_dir/bin"
+
+  export FAKE_PNPM_STATE_FILE="$case_dir/pnpm-state.txt"
+  export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+  export FAKE_PNPM_LIST_COUNT_FILE="$case_dir/pnpm-list-count.txt"
+  export FAKE_PNPM_LIST_FAIL_AT=2
+  printf '%s\n' 'Legend: production dependency, optional only, dev only' '' '/fake/pnpm/global/5' '│' '│   dependencies:' '├── wrangler@4.73.0' '└── @antfu/ni@24.2.0' '' '2 packages' > "$FAKE_PNPM_STATE_FILE"
+
+  run_global_packages "$case_dir" false pnpm
+
+  assert_ne "0" "$TEST_EXIT_CODE" "pnpm post-list-fail exit"
+  assert_eq "❌ Failed" "${TEST_RESULT[status.pnpm]}" "pnpm post-list-fail status"
+  assert_contains "$TEST_OUTPUT" "Updating pnpm globals:"
+  assert_contains "$TEST_OUTPUT" "pnpm global package list failed after update"
+  assert_contains "$TEST_OUTPUT" "node: not found"
+  # update did run, so the failure is specifically the post-update list
+  local record
+  record="$(< "$case_dir/pnpm-record.txt")"
+  assert_contains "$record" "args=update -g --latest"
+
+  clear_fake_env
+}
+
 test_bun_globals_use_temp_dir_at_boundary() {
   local case_dir="$tmp/bun"
   setup_case "$case_dir"
@@ -432,6 +498,8 @@ test_npm_globals_install_latest_at_boundary
 test_npm_globals_restore_from_baseline_after_runtime_switch
 test_pnpm_globals_update_latest_at_boundary
 test_pnpm_globals_manager_only_reports_nothing_to_update
+test_pnpm_globals_fail_when_initial_list_fails
+test_pnpm_globals_fail_when_post_update_list_fails
 test_bun_globals_use_temp_dir_at_boundary
 test_uv_tools_upgrade_all_at_boundary
 test_default_run_handles_dry_run_and_missing_managers
