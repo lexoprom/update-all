@@ -98,6 +98,10 @@ if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
     n=1
     [[ -f "$count_file" ]] && n=$(( $(< "$count_file") + 1 ))
     printf '%s\n' "$n" > "$count_file"
+    if [[ -n "${FAKE_PNPM_LIST_FAIL_FIRST:-}" && "$n" -le "${FAKE_PNPM_LIST_FAIL_FIRST}" ]]; then
+      printf '%s\n' '/home/user/.local/share/pnpm/pnpm: line 2: exec: node: not found' >&2
+      exit 1
+    fi
     if [[ -n "${FAKE_PNPM_LIST_FAIL_AT:-}" && "$n" -ge "${FAKE_PNPM_LIST_FAIL_AT}" ]]; then
       printf '%s\n' '/home/user/.local/share/pnpm/pnpm: line 2: exec: node: not found' >&2
       exit 1
@@ -134,6 +138,22 @@ fi
 exit 0
 EOF
   chmod +x "$bindir/pnpm"
+}
+
+create_fake_npx() {
+  local bindir="$1"
+  cat > "$bindir/npx" <<'EOF'
+#!/usr/bin/env bash
+record_file="${FAKE_NPX_RECORD_FILE:-}"
+if [[ -n "$record_file" ]]; then
+  printf 'args=%s\tpm_on_fail=%s\n' "$*" "${pnpm_config_pm_on_fail:-}" >> "$record_file"
+fi
+if [[ -n "${FAKE_NPX_STDERR:-}" ]]; then
+  printf '%s\n' "$FAKE_NPX_STDERR" >&2
+fi
+exit "${FAKE_NPX_EXIT_CODE:-0}"
+EOF
+  chmod +x "$bindir/npx"
 }
 
 create_fake_bun() {
@@ -229,7 +249,7 @@ snapshot_global_packages() {
 clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
-  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE FAKE_PNPM_LIST_COUNT_FILE FAKE_PNPM_LIST_FAIL_AT
+  unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE FAKE_PNPM_LIST_COUNT_FILE FAKE_PNPM_LIST_FAIL_AT FAKE_PNPM_LIST_FAIL_FIRST FAKE_NPX_RECORD_FILE FAKE_NPX_EXIT_CODE FAKE_NPX_STDERR
   unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
   unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
 }
@@ -362,23 +382,82 @@ test_pnpm_globals_manager_only_reports_nothing_to_update() {
   clear_fake_env
 }
 
-test_pnpm_globals_fail_when_initial_list_fails() {
-  local case_dir="$tmp/pnpm-initial-fail"
+test_pnpm_globals_recover_then_update_when_initial_list_fails() {
+  local case_dir="$tmp/pnpm-recover"
   setup_case "$case_dir"
   create_fake_pnpm "$case_dir/bin"
+  create_fake_npx "$case_dir/bin"
 
-  export FAKE_PNPM_LIST_COUNT_FILE="$case_dir/pnpm-list-count.txt"
-  export FAKE_PNPM_LIST_FAIL_AT=1
+  export FAKE_PNPM_STATE_FILE="$case_dir/pnpm-state.txt"
   export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+  export FAKE_PNPM_LIST_COUNT_FILE="$case_dir/pnpm-list-count.txt"
+  export FAKE_PNPM_LIST_FAIL_FIRST=1
+  export FAKE_NPX_RECORD_FILE="$case_dir/npx-record.txt"
+  printf '%s\n' 'Legend: production dependency, optional only, dev only' '' '/fake/pnpm/global/5' '│' '│   dependencies:' '├── wrangler@4.73.0' '└── @antfu/ni@24.2.0' '' '2 packages' > "$FAKE_PNPM_STATE_FILE"
+  export FAKE_PNPM_NEXT_LIST_OUTPUT=$'Legend: production dependency, optional only, dev only\n\n/fake/pnpm/global/5\n│\n│   dependencies:\n├── wrangler@4.74.0\n└── @antfu/ni@24.3.0\n\n2 packages'
 
   run_global_packages "$case_dir" false pnpm
 
-  assert_ne "0" "$TEST_EXIT_CODE" "pnpm initial-list-fail exit"
-  assert_eq "❌ Failed" "${TEST_RESULT[status.pnpm]}" "pnpm initial-list-fail status"
+  assert_eq "0" "$TEST_EXIT_CODE" "pnpm recover exit"
+  assert_eq "✅ Success" "${TEST_RESULT[status.pnpm]}" "pnpm recover status"
+  assert_eq "1" "$(grep -c . "$case_dir/npx-record.txt")" "npx recovery call count"
+  assert_contains "$(cat "$case_dir/npx-record.txt")" "pnpm@latest-11 self-update"
+  assert_contains "$(cat "$case_dir/npx-record.txt")" "pm_on_fail=ignore"
+  assert_contains "$TEST_OUTPUT" "Recovered pnpm via npm"
+  assert_contains "$TEST_OUTPUT" "Updating pnpm globals:"
+  local record
+  record="$(< "$case_dir/pnpm-record.txt")"
+  assert_contains "$record" "args=update -g --latest"
+
+  clear_fake_env
+}
+
+test_pnpm_globals_fail_when_recovery_fails() {
+  local case_dir="$tmp/pnpm-recovery-fail"
+  setup_case "$case_dir"
+  create_fake_pnpm "$case_dir/bin"
+  create_fake_npx "$case_dir/bin"
+
+  export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+  export FAKE_PNPM_LIST_COUNT_FILE="$case_dir/pnpm-list-count.txt"
+  export FAKE_PNPM_LIST_FAIL_FIRST=1
+  export FAKE_NPX_RECORD_FILE="$case_dir/npx-record.txt"
+  export FAKE_NPX_EXIT_CODE=1
+  export FAKE_NPX_STDERR="npx: ERR_PNPM_NO_RESPONSE  registry timeout"
+
+  run_global_packages "$case_dir" false pnpm
+
+  assert_ne "0" "$TEST_EXIT_CODE" "pnpm recovery-fail exit"
+  assert_eq "❌ Failed" "${TEST_RESULT[status.pnpm]}" "pnpm recovery-fail status"
+  assert_eq "1" "$(grep -c . "$case_dir/npx-record.txt")" "npx recovery call count"
+  assert_contains "$TEST_OUTPUT" "pnpm recovery failed"
+  assert_contains "$TEST_OUTPUT" "registry timeout"
   assert_not_contains "$TEST_OUTPUT" "No global pnpm packages detected."
-  assert_contains "$TEST_OUTPUT" "pnpm global package list failed"
+  [[ ! -f "$case_dir/pnpm-record.txt" ]] || fail "pnpm update ran despite failed recovery"
+
+  clear_fake_env
+}
+
+test_pnpm_globals_fail_when_retry_after_recovery_fails() {
+  local case_dir="$tmp/pnpm-retry-fail"
+  setup_case "$case_dir"
+  create_fake_pnpm "$case_dir/bin"
+  create_fake_npx "$case_dir/bin"
+
+  export FAKE_PNPM_RECORD_FILE="$case_dir/pnpm-record.txt"
+  export FAKE_PNPM_LIST_COUNT_FILE="$case_dir/pnpm-list-count.txt"
+  export FAKE_PNPM_LIST_FAIL_FIRST=2
+  export FAKE_NPX_RECORD_FILE="$case_dir/npx-record.txt"
+
+  run_global_packages "$case_dir" false pnpm
+
+  assert_ne "0" "$TEST_EXIT_CODE" "pnpm retry-fail exit"
+  assert_eq "❌ Failed" "${TEST_RESULT[status.pnpm]}" "pnpm retry-fail status"
+  assert_eq "1" "$(grep -c . "$case_dir/npx-record.txt")" "npx recovery call count"
+  assert_contains "$TEST_OUTPUT" "pnpm global package list failed after recovery"
   assert_contains "$TEST_OUTPUT" "node: not found"
-  [[ ! -f "$case_dir/pnpm-record.txt" ]] || fail "pnpm update ran despite failed initial list"
+  assert_not_contains "$TEST_OUTPUT" "No global pnpm packages detected."
+  [[ ! -f "$case_dir/pnpm-record.txt" ]] || fail "pnpm update ran despite failed retry"
 
   clear_fake_env
 }
@@ -498,7 +577,9 @@ test_npm_globals_install_latest_at_boundary
 test_npm_globals_restore_from_baseline_after_runtime_switch
 test_pnpm_globals_update_latest_at_boundary
 test_pnpm_globals_manager_only_reports_nothing_to_update
-test_pnpm_globals_fail_when_initial_list_fails
+test_pnpm_globals_recover_then_update_when_initial_list_fails
+test_pnpm_globals_fail_when_recovery_fails
+test_pnpm_globals_fail_when_retry_after_recovery_fails
 test_pnpm_globals_fail_when_post_update_list_fails
 test_bun_globals_use_temp_dir_at_boundary
 test_uv_tools_upgrade_all_at_boundary

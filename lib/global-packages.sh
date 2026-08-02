@@ -155,13 +155,23 @@ _global_packages_pnpm_run() {
     local log_file="$report_dir/pnpm_update.log"
     local before_list="$report_dir/pnpm_list_before.txt"
     local before_err="$report_dir/pnpm_list_before.err"
+    local recovery_log="$report_dir/pnpm_recovery.log"
 
     # Capture list output and stderr explicitly. A broken pnpm launcher exits
     # non-zero; treating that as an empty parse would falsely report "No global
-    # pnpm packages detected." Surface it as a real failure instead.
+    # pnpm packages detected." When the list fails, bootstrap pnpm via npm/npx
+    # (the same recovery command as update-all.commands) and retry exactly once
+    # before giving up.
     if ! pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
-        _global_packages_log_failure "$before_err" "⚠️ pnpm global package list failed. Details:"
-        return 1
+        if ! pnpm_config_pm_on_fail=ignore npx --yes pnpm@latest-11 self-update > "$recovery_log" 2>&1; then
+            _global_packages_log_failure "$recovery_log" "⚠️ pnpm recovery failed. Details:"
+            return 1
+        fi
+        if ! pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
+            _global_packages_log_failure "$before_err" "⚠️ pnpm global package list failed after recovery. Details:"
+            return 1
+        fi
+        echo "Recovered pnpm via npm; retrying global package list."
     fi
 
     declare -A old_versions=()
