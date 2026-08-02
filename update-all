@@ -292,13 +292,25 @@ list_join_commas() {
     awk 'NF{printf "%s%s", sep, $0; sep=", "} END{if(sep!="")print ""}'
 }
 
-# Print "<label>: <items>" or "<label>: none" when items is empty.
+# Print a section header on its own line: bold "<label>:".
+list_section_header() {
+    printf '%b%s:%b\n' "$BOLD" "$1" "$NC"
+}
+
+# Print a dim bullet body line: "  ·  <text>".
+list_section_body() {
+    printf '  %b·  %s%b\n' "$DIM" "$1" "$NC"
+}
+
+# Print a manager section as two lines (header + dim bullet body).
+# Empty items render as "none".
 list_emit() {
     local label="$1" items="$2"
+    list_section_header "$label"
     if [[ -z "$items" ]]; then
-        printf '%s: none\n' "$label"
+        list_section_body "none"
     else
-        printf '%s: %s\n' "$label" "$items"
+        list_section_body "$items"
     fi
 }
 
@@ -316,7 +328,7 @@ list_emit_assoc() {
 }
 
 list_homebrew_line() {
-    command_exists brew || { printf 'Homebrew: not installed\n'; return 0; }
+    command_exists brew || { list_emit "Homebrew" "not installed"; return 0; }
     local rc=0 formula_out cask_out
     if [[ "$LIST_VERSIONS" == true ]]; then
         formula_out="$(brew list --versions --formula 2>/dev/null)" || rc=1
@@ -326,7 +338,7 @@ list_homebrew_line() {
         cask_out="$(brew list --cask 2>/dev/null)" || rc=1
     fi
     if [[ $rc -ne 0 ]]; then
-        printf 'Homebrew: failed\n'
+        list_emit "Homebrew" "failed"
         return 1
     fi
     local items
@@ -337,19 +349,19 @@ list_homebrew_line() {
 
 list_macos_line() {
     if command_exists softwareupdate; then
-        printf 'macOS Software Update: available\n'
+        list_emit "macOS Software Update" "available"
     else
-        printf 'macOS Software Update: not installed\n'
+        list_emit "macOS Software Update" "not installed"
     fi
     return 0
 }
 
 list_mise_line() {
-    command_exists mise || { printf 'mise: not installed\n'; return 0; }
+    command_exists mise || { list_emit "mise" "not installed"; return 0; }
     local out rc=0
     out="$(mise ls --installed --no-header 2>/dev/null)" || rc=1
     if [[ $rc -ne 0 ]]; then
-        printf 'mise: failed\n'
+        list_emit "mise" "failed"
         return 1
     fi
     local items
@@ -363,11 +375,11 @@ list_mise_line() {
 }
 
 list_pipx_line() {
-    command_exists pipx || { printf 'pipx: not installed\n'; return 0; }
+    command_exists pipx || { list_emit "pipx" "not installed"; return 0; }
     local out rc=0
     out="$(pipx list --short 2>/dev/null)" || rc=1
     if [[ $rc -ne 0 ]]; then
-        printf 'pipx: failed\n'
+        list_emit "pipx" "failed"
         return 1
     fi
     local -A versions=()
@@ -380,11 +392,11 @@ list_pipx_line() {
 }
 
 list_npm_line() {
-    command_exists npm || { printf 'npm: not installed\n'; return 0; }
+    command_exists npm || { list_emit "npm" "not installed"; return 0; }
     local out rc=0
     out="$(npm list -g --depth=0 2>/dev/null)" || rc=1
     if [[ $rc -ne 0 ]]; then
-        printf 'npm: failed\n'
+        list_emit "npm" "failed"
         return 1
     fi
     local -A versions=()
@@ -394,11 +406,11 @@ list_npm_line() {
 }
 
 list_pnpm_line() {
-    command_exists pnpm || { printf 'pnpm: not installed\n'; return 0; }
+    command_exists pnpm || { list_emit "pnpm" "not installed"; return 0; }
     local out rc=0
     out="$(pnpm list -g --depth=0 2>/dev/null)" || rc=1
     if [[ $rc -ne 0 ]]; then
-        printf 'pnpm: failed\n'
+        list_emit "pnpm" "failed"
         return 1
     fi
     local -A versions=()
@@ -408,7 +420,7 @@ list_pnpm_line() {
 }
 
 list_bun_line() {
-    command_exists bun || { printf 'Bun: not installed\n'; return 0; }
+    command_exists bun || { list_emit "Bun" "not installed"; return 0; }
     local workdir errfile out err rc=0
     # Mirror the Bun updater: list globals from a fresh temp directory so a
     # local lockfile/project context cannot break or pollute the inventory.
@@ -421,10 +433,10 @@ list_bun_line() {
         # Bun's empty-global state emits "Lockfile not found" and exits 1; treat
         # that as an empty inventory rather than a collector failure.
         if [[ "$err" == *"Lockfile not found"* ]]; then
-            printf 'Bun: none\n'
+            list_emit "Bun" "none"
             return 0
         fi
-        printf 'Bun: failed\n'
+        list_emit "Bun" "failed"
         return 1
     fi
     local -A versions=()
@@ -434,11 +446,11 @@ list_bun_line() {
 }
 
 list_uv_line() {
-    command_exists uv || { printf 'uv: not installed\n'; return 0; }
+    command_exists uv || { list_emit "uv" "not installed"; return 0; }
     local out rc=0
     out="$(uv tool list 2>/dev/null)" || rc=1
     if [[ $rc -ne 0 ]]; then
-        printf 'uv: failed\n'
+        list_emit "uv" "failed"
         return 1
     fi
     local items
@@ -453,19 +465,20 @@ list_uv_line() {
 
 list_custom_commands_lines() {
     if [[ "$SKIP_COMMANDS" == true ]]; then
-        printf 'custom commands: skipped\n'
+        list_emit "custom commands" "skipped"
         return 0
     fi
     if [[ ! -f "$COMMANDS_FILE" ]] || ! custom_commands_has_entries "$COMMANDS_FILE"; then
-        printf 'custom commands: none\n'
+        list_emit "custom commands" "none"
         return 0
     fi
+    list_section_header "custom commands"
     local line trimmed i=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         trimmed="$(_custom_commands_trim "$line")"
         [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
         i=$((i + 1))
-        printf 'custom command %02d: %s\n' "$i" "$trimmed"
+        list_section_body "$(printf 'custom command %02d: %s' "$i" "$trimmed")"
     done < "$COMMANDS_FILE"
     return 0
 }

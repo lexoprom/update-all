@@ -35,6 +35,13 @@ assert_equals() {
   fi
 }
 
+# Print the body line that immediately follows the "<header>:" line.
+# Lets tests pair a two-line section's header with its dim bullet body.
+body_after() {
+  local haystack="$1" header="$2"
+  printf '%s\n' "$haystack" | awk -v h="$header" 'found{print; exit} $0==h{found=1}'
+}
+
 make_fake_cmds() {
   local bindir="$1"
 
@@ -208,25 +215,43 @@ run_list_rc() {
   return "$rc"
 }
 
-DEFAULT_EXPECTED="Homebrew: firefox, git, node
-macOS Software Update: available
-mise: node, python
-pipx: black, ruff
-npm: @scope/pkg-a, typescript
-pnpm: cowsay, tsc
-Bun: is-even, is-odd
-uv: eslint, ruff
-custom commands: none"
+DEFAULT_EXPECTED="Homebrew:
+  ·  firefox, git, node
+macOS Software Update:
+  ·  available
+mise:
+  ·  node, python
+pipx:
+  ·  black, ruff
+npm:
+  ·  @scope/pkg-a, typescript
+pnpm:
+  ·  cowsay, tsc
+Bun:
+  ·  is-even, is-odd
+uv:
+  ·  eslint, ruff
+custom commands:
+  ·  none"
 
-VERSIONS_EXPECTED="Homebrew: firefox 120.0, git 2.43.0, node 20.0.0
-macOS Software Update: available
-mise: node 18.0.0, node 20.10.0, python 3.12.0
-pipx: black 24.0.0, ruff 0.1.0
-npm: @scope/pkg-a 1.2.3, typescript 5.4.0
-pnpm: cowsay 1.6.0, tsc 5.0.0
-Bun: is-even 1.0.0, is-odd 3.0.1
-uv: eslint v9.0.0, ruff v0.1.0
-custom commands: none"
+VERSIONS_EXPECTED="Homebrew:
+  ·  firefox 120.0, git 2.43.0, node 20.0.0
+macOS Software Update:
+  ·  available
+mise:
+  ·  node 18.0.0, node 20.10.0, python 3.12.0
+pipx:
+  ·  black 24.0.0, ruff 0.1.0
+npm:
+  ·  @scope/pkg-a 1.2.3, typescript 5.4.0
+pnpm:
+  ·  cowsay 1.6.0, tsc 5.0.0
+Bun:
+  ·  is-even 1.0.0, is-odd 3.0.1
+uv:
+  ·  eslint v9.0.0, ruff v0.1.0
+custom commands:
+  ·  none"
 
 test_default_output() {
   local case_dir="$tmp/default"
@@ -253,8 +278,10 @@ test_skip_brew_omits_and_does_not_invoke_homebrew() {
   local text
   text="$(cat "$out")"
   assert_not_contains "$text" "Homebrew:"
-  assert_contains "$text" "macOS Software Update: available"
-  assert_contains "$text" "npm: @scope/pkg-a, typescript"
+  assert_contains "$text" "macOS Software Update:"
+  assert_contains "$text" "·  available"
+  assert_contains "$text" "npm:"
+  assert_contains "$text" "·  @scope/pkg-a, typescript"
   [[ ! -s "$brew_log" ]] || fail "brew was invoked under --skip-brew: $(cat "$brew_log")"
 }
 
@@ -269,9 +296,10 @@ test_failing_collector_does_not_suppress_others_and_exits_1() {
   [[ $rc -eq 1 ]] || fail "expected exit status 1, got $rc"
   local text
   text="$(cat "$out")"
-  assert_contains "$text" "Homebrew: failed"
-  assert_contains "$text" "npm: @scope/pkg-a, typescript"
-  assert_contains "$text" "uv: eslint, ruff"
+  assert_contains "$text" "Homebrew:"
+  assert_equals "$(body_after "$text" "Homebrew:")" "  ·  failed"
+  assert_contains "$text" "·  @scope/pkg-a, typescript"
+  assert_contains "$text" "·  eslint, ruff"
 }
 
 test_unavailable_manager_shows_not_installed() {
@@ -282,8 +310,9 @@ test_unavailable_manager_shows_not_installed() {
   run_list_rc "$case_dir" "$out" list
   local text
   text="$(cat "$out")"
-  assert_contains "$text" "Bun: not installed"
-  assert_contains "$text" "npm: @scope/pkg-a, typescript"
+  assert_contains "$text" "Bun:"
+  assert_equals "$(body_after "$text" "Bun:")" "  ·  not installed"
+  assert_contains "$text" "·  @scope/pkg-a, typescript"
 }
 
 test_empty_manager_shows_none() {
@@ -291,7 +320,8 @@ test_empty_manager_shows_none() {
   local out="$tmp/empty.out"
   setup_case "$case_dir"
   FAKE_UV_EMPTY=1 run_list_rc "$case_dir" "$out" list
-  assert_contains "$(cat "$out")" "uv: none"
+  assert_contains "$(cat "$out")" "uv:"
+  assert_equals "$(body_after "$(cat "$out")" "uv:")" "  ·  none"
 }
 
 test_custom_commands_listed_in_order_not_executed() {
@@ -335,7 +365,8 @@ EOF
   assert_not_contains "$text" "echo default-file"
 
   run_list_rc "$case_dir" "$out" list --skip-commands
-  assert_contains "$(cat "$out")" "custom commands: skipped"
+  assert_contains "$(cat "$out")" "custom commands:"
+  assert_contains "$(cat "$out")" "·  skipped"
 }
 
 test_list_does_not_run_updates_or_snapshot_or_lock() {
@@ -379,6 +410,24 @@ test_general_help_mentions_list() {
   assert_contains "$(cat "$out")" "list"
 }
 
+test_list_emits_bold_header_and_dim_body_ansi() {
+  # Raw (non-stripped) output must use ${BOLD}...${NC} for headers and
+  # ${DIM}·  ...${NC} for the dim bullet body lines.
+  local case_dir="$tmp/ansi"
+  local out="$tmp/ansi.out"
+  setup_case "$case_dir"
+  local raw rc=0
+  raw="$(HOME="$case_dir/home" PATH="$case_dir/bin:/usr/bin:/bin" env -u PNPM_HOME \
+    "$case_dir/update-all" list 2>&1)" || rc=$?
+  [[ $rc -eq 0 ]] || fail "list exited $rc during ANSI test"
+  assert_contains "$raw" $'\033[1mHomebrew:\033[0m'
+  assert_contains "$raw" $'  \033[2m·  firefox, git, node\033[0m'
+  assert_contains "$raw" $'\033[1mmacOS Software Update:\033[0m'
+  assert_contains "$raw" $'  \033[2m·  available\033[0m'
+  assert_contains "$raw" $'\033[1mcustom commands:\033[0m'
+  assert_contains "$raw" $'  \033[2m·  none\033[0m'
+}
+
 test_versions_combines_with_skip_brew_and_skip_commands() {
   local case_dir="$tmp/combo"
   local out="$tmp/combo.out"
@@ -390,8 +439,9 @@ EOF
   local text
   text="$(cat "$out")"
   assert_not_contains "$text" "Homebrew:"
-  assert_contains "$text" "npm: @scope/pkg-a 1.2.3, typescript 5.4.0"
-  assert_contains "$text" "custom commands: skipped"
+  assert_contains "$text" "·  @scope/pkg-a 1.2.3, typescript 5.4.0"
+  assert_contains "$text" "custom commands:"
+  assert_contains "$text" "·  skipped"
 }
 
 test_mise_requires_installed_flag() {
@@ -404,7 +454,8 @@ test_mise_requires_installed_flag() {
   local text
   text="$(cat "$out")"
   assert_not_contains "$text" "ruby"
-  assert_contains "$text" "mise: node, python"
+  assert_contains "$text" "mise:"
+  assert_contains "$text" "·  node, python"
 }
 
 test_pipx_requires_short_flag() {
@@ -412,7 +463,8 @@ test_pipx_requires_short_flag() {
   local out="$tmp/pipxshort.out"
   setup_case "$case_dir"
   run_list_rc "$case_dir" "$out" list
-  assert_contains "$(cat "$out")" "pipx: black, ruff"
+  assert_contains "$(cat "$out")" "pipx:"
+  assert_contains "$(cat "$out")" "·  black, ruff"
 }
 
 test_collector_failures_reported() {
@@ -437,8 +489,9 @@ test_collector_failures_reported() {
     unset "$flag"
     [[ $rc -eq 1 ]] || fail "$mgr: expected exit status 1, got $rc"
     text="$(cat "$out")"
-    assert_contains "$text" "$label: failed"
-    assert_contains "$text" "uv: eslint, ruff"
+    assert_contains "$text" "$label:"
+    assert_equals "$(body_after "$text" "$label:")" "  ·  failed"
+    assert_contains "$text" "·  eslint, ruff"
   done
 }
 
@@ -466,8 +519,8 @@ test_bun_lockfile_missing_is_none() {
   [[ $rc -eq 0 ]] || fail "expected exit status 0 for bun lockfile-missing, got $rc"
   local text
   text="$(cat "$out")"
-  assert_contains "$text" "Bun: none"
-  assert_not_contains "$text" "Bun: failed"
+  assert_contains "$text" "Bun:"
+  assert_equals "$(body_after "$text" "Bun:")" "  ·  none"
 }
 
 test_bun_uses_temp_working_directory() {
@@ -480,7 +533,8 @@ test_bun_uses_temp_working_directory() {
   local recorded
   recorded="$(cat "$pwd_file")"
   [[ "$recorded" != "$case_dir/home" ]] || fail "bun ran from \$HOME: $recorded"
-  assert_contains "$(cat "$out")" "Bun: is-even, is-odd"
+  assert_contains "$(cat "$out")" "Bun:"
+  assert_contains "$(cat "$out")" "·  is-even, is-odd"
 }
 
 test_list_preserves_foreign_lock() {
@@ -521,6 +575,7 @@ trap cleanup EXIT
 
 test_default_output
 test_versions_output
+test_list_emits_bold_header_and_dim_body_ansi
 test_skip_brew_omits_and_does_not_invoke_homebrew
 test_failing_collector_does_not_suppress_others_and_exits_1
 test_unavailable_manager_shows_not_installed
