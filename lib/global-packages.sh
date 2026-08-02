@@ -163,7 +163,11 @@ _global_packages_pnpm_run() {
     fi
 
     local -a packages=()
-    readarray -t packages < <(map_to_latest old_versions pnpm @pnpm/exe)
+    local pkg_name
+    for pkg_name in "${!old_versions[@]}"; do
+        [[ "$pkg_name" == "pnpm" || "$pkg_name" == "@pnpm/exe" ]] && continue
+        packages+=("$pkg_name")
+    done
 
     if [[ ${#packages[@]} -eq 0 ]]; then
         echo "No global pnpm packages to update."

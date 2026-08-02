@@ -92,6 +92,12 @@ if [[ "${1:-}" == "list" && "${2:-}" == "-g" && "${3:-}" == "--depth=0" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "update" && "${2:-}" == "-g" && "${3:-}" == "--latest" ]]; then
+  for _arg in "${@:4}"; do
+    if [[ "$_arg" == *@latest ]]; then
+      echo "ERR_PNPM_LATEST_WITH_SPEC: Specs are not allowed to be used with --latest ($_arg)" >&2
+      exit 1
+    fi
+  done
   if [[ -n "${FAKE_PNPM_RECORD_FILE:-}" ]]; then
     printf 'args=%s\n' "$*" >> "$FAKE_PNPM_RECORD_FILE"
   fi
@@ -304,10 +310,12 @@ test_pnpm_globals_update_latest_at_boundary() {
   local record
   record="$(< "$case_dir/pnpm-record.txt")"
   assert_contains "$record" "args=update -g --latest"
-  assert_contains "$record" "wrangler@latest"
-  assert_contains "$record" "@antfu/ni@latest"
-  assert_not_contains "$record" "@pnpm/exe@latest"
-  assert_not_contains "$record" "pnpm@latest"
+  assert_contains "$record" "wrangler"
+  assert_contains "$record" "@antfu/ni"
+  assert_not_contains "$record" "wrangler@latest"
+  assert_not_contains "$record" "@antfu/ni@latest"
+  assert_not_contains "$record" "pnpm"
+  assert_not_contains "$record" "@pnpm/exe"
   assert_contains "$record" "args=approve-builds -g --all"
   assert_contains "$TEST_OUTPUT" "Updating pnpm globals:"
   assert_contains "$TEST_OUTPUT" "wrangler: 4.73.0 → 4.74.0"
