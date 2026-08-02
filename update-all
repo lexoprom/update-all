@@ -47,6 +47,7 @@ VERBOSE=false
 FORCE_RUN=false
 SCRIPT_NAME="$(basename "$0")"
 LOCK_FILE="/tmp/.${SCRIPT_NAME}_lock"
+LOCK_ACQUIRED=false
 REPORT_DIR=""
 SKIP_COMMANDS=false
 COMMANDS_FILE=""
@@ -89,7 +90,14 @@ readonly NC='\033[0m'
 # Cleanup on exit
 cleanup() {
     local exit_code=$?
-    [[ -f "$LOCK_FILE" ]] && rm -f "$LOCK_FILE"
+    # Only remove a lock this process actually acquired, and only if it still
+    # holds our PID: `list`/`list --help` never acquire a lock, and a forced
+    # takeover may have since replaced it with another process's PID.
+    if [[ "$LOCK_ACQUIRED" == true && -f "$LOCK_FILE" ]]; then
+        if [[ "$(cat "$LOCK_FILE" 2>/dev/null || echo "")" == "$$" ]]; then
+            rm -f "$LOCK_FILE"
+        fi
+    fi
     if [[ -n "${REPORT_DIR:-}" && -d "$REPORT_DIR" ]]; then
         rm -rf "$REPORT_DIR"
     fi
@@ -172,6 +180,7 @@ acquire_lock() {
         fi
     fi
     echo "$$" > "$LOCK_FILE"
+    LOCK_ACQUIRED=true
 }
 
 # --- UPDATE FUNCTIONS ---

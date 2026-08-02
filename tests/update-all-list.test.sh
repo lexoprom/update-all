@@ -483,6 +483,37 @@ test_bun_uses_temp_working_directory() {
   assert_contains "$(cat "$out")" "Bun: is-even, is-odd"
 }
 
+test_list_preserves_foreign_lock() {
+  # `list` and `list --help` never acquire a lock, so on exit they must not
+  # remove a lock owned by another live updater. Use a uniquely named copy so
+  # its /tmp/.<name>_lock cannot collide with a real updater or a parallel test.
+  local case_dir="$tmp/lock"
+  local out="$tmp/lock.out"
+  local uniq="ua-locktest-$RANDOM-$$"
+  local script="$case_dir/$uniq"
+  setup_case "$case_dir"
+  cp ./update-all "$script"
+  chmod +x "$script"
+
+  local lock_file="/tmp/.${uniq}_lock"
+  # Seed the lock with the PID of a genuinely live, foreign process.
+  sleep 30 & local lock_pid=$!
+  echo "$lock_pid" > "$lock_file"
+
+  local rc
+  for args in "list" "list --help"; do
+    rc=0
+    HOME="$case_dir/home" PATH="$case_dir/bin:/usr/bin:/bin" env -u PNPM_HOME \
+      "$script" $args >"$out" 2>&1 || rc=$?
+    [[ -f "$lock_file" ]] || fail "lock removed after '$args'"
+    [[ "$(cat "$lock_file" 2>/dev/null || echo "")" == "$lock_pid" ]] || \
+      fail "lock contents changed after '$args'"
+  done
+
+  kill "$lock_pid" 2>/dev/null || true
+  rm -f "$lock_file"
+}
+
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 cleanup() { rm -rf "$tmp"; }
@@ -506,5 +537,6 @@ test_collector_failures_reported
 test_bun_uses_temp_working_directory
 test_pnpm_global_bin_on_path
 test_bun_lockfile_missing_is_none
+test_list_preserves_foreign_lock
 
 echo "PASS"
