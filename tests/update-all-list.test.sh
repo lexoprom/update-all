@@ -339,9 +339,9 @@ EOF
   run_list_rc "$case_dir" "$out" list
   local text
   text="$(cat "$out")"
-  assert_contains "$text" "custom command 01: echo first"
-  assert_contains "$text" "custom command 02: touch \"$marker\""
-  assert_contains "$text" "custom command 03: echo second, with comma"
+  assert_contains "$text" "·  echo first"
+  assert_contains "$text" "·  touch \"$marker\""
+  assert_contains "$text" "·  echo second, with comma"
   [[ ! -e "$marker" ]] || fail "custom command was executed during list"
 }
 
@@ -360,8 +360,8 @@ EOF
   run_list_rc "$case_dir" "$out" list --commands-file "$case_dir/custom.commands"
   local text
   text="$(cat "$out")"
-  assert_contains "$text" "custom command 01: echo override-one"
-  assert_contains "$text" "custom command 02: echo override-two"
+  assert_contains "$text" "·  echo override-one"
+  assert_contains "$text" "·  echo override-two"
   assert_not_contains "$text" "echo default-file"
 
   run_list_rc "$case_dir" "$out" list --skip-commands

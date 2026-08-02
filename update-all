@@ -473,12 +473,11 @@ list_custom_commands_lines() {
         return 0
     fi
     list_section_header "custom commands"
-    local line trimmed i=0
+    local line trimmed
     while IFS= read -r line || [[ -n "$line" ]]; do
         trimmed="$(_custom_commands_trim "$line")"
         [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
-        i=$((i + 1))
-        list_section_body "$(printf 'custom command %02d: %s' "$i" "$trimmed")"
+        list_section_body "$trimmed"
     done < "$COMMANDS_FILE"
     return 0
 }
