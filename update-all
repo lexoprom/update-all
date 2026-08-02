@@ -47,9 +47,12 @@ VERBOSE=false
 FORCE_RUN=false
 SCRIPT_NAME="$(basename "$0")"
 LOCK_FILE="/tmp/.${SCRIPT_NAME}_lock"
-REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
+REPORT_DIR=""
 SKIP_COMMANDS=false
 COMMANDS_FILE=""
+LIST_VERSIONS=false
+LIST_SKIP_BREW=false
+LIST_MODE=false
 
 resolve_script_path() {
     local path="$1"
@@ -73,11 +76,6 @@ source "$SCRIPT_DIR/lib/global-packages.sh"
 source "$SCRIPT_DIR/lib/custom-commands.sh"
 source "$SCRIPT_DIR/lib/tool-runner.sh"
 
-if [[ ! -d "$REPORT_DIR" ]]; then
-    echo "Failed to create report directory. Exiting." >&2
-    exit 1
-fi
-
 # Colors
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[0;33m'
@@ -95,7 +93,7 @@ cleanup() {
     if [[ -n "${REPORT_DIR:-}" && -d "$REPORT_DIR" ]]; then
         rm -rf "$REPORT_DIR"
     fi
-    if [[ $exit_code -ne 0 && $exit_code -ne 130 ]]; then
+    if [[ $exit_code -ne 0 && $exit_code -ne 130 && "$LIST_MODE" != true ]]; then
         echo -e "\n${RED}Script aborted (exit code: $exit_code)${NC}"
     fi
     exit $exit_code
@@ -268,10 +266,264 @@ configure_tool_runner() {
         custom_commands_tool_enabled update_custom_commands custom_commands_tool_components custom_commands_tool_disabled
 }
 
+# --- SHARED ENVIRONMENT ---
+
+setup_environment() {
+    cd "$HOME"
+    export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
+    export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
+    if command_exists mise; then eval "$(mise activate bash)"; fi
+    export PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
+}
+
+# --- LIST COMMAND ---
+
+# Join non-empty stdin lines with ", ".
+list_join_commas() {
+    awk 'NF{printf "%s%s", sep, $0; sep=", "} END{if(sep!="")print ""}'
+}
+
+# Print "<label>: <items>" or "<label>: none" when items is empty.
+list_emit() {
+    local label="$1" items="$2"
+    if [[ -z "$items" ]]; then
+        printf '%s: none\n' "$label"
+    else
+        printf '%s: %s\n' "$label" "$items"
+    fi
+}
+
+# Render an associative array (name=version) as a manager line.
+list_emit_assoc() {
+    local label="$1" aname="$2"
+    local -n _items="$aname"
+    local joined
+    if [[ "$LIST_VERSIONS" == true ]]; then
+        joined="$(for k in "${!_items[@]}"; do printf '%s %s\n' "$k" "${_items[$k]}"; done | sort -u | list_join_commas)"
+    else
+        joined="$(printf '%s\n' "${!_items[@]}" | sort -u | list_join_commas)"
+    fi
+    list_emit "$label" "$joined"
+}
+
+list_homebrew_line() {
+    command_exists brew || { printf 'Homebrew: not installed\n'; return 0; }
+    local rc=0 formula_out cask_out
+    if [[ "$LIST_VERSIONS" == true ]]; then
+        formula_out="$(brew list --versions --formula 2>/dev/null)" || rc=1
+        cask_out="$(brew list --versions --cask 2>/dev/null)" || rc=1
+    else
+        formula_out="$(brew list --formula 2>/dev/null)" || rc=1
+        cask_out="$(brew list --cask 2>/dev/null)" || rc=1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        printf 'Homebrew: failed\n'
+        return 1
+    fi
+    local items
+    items="$(printf '%s\n%s\n' "$formula_out" "$cask_out" | awk 'NF' | sort -u | list_join_commas)"
+    list_emit "Homebrew" "$items"
+    return 0
+}
+
+list_macos_line() {
+    if command_exists softwareupdate; then
+        printf 'macOS Software Update: available\n'
+    else
+        printf 'macOS Software Update: not installed\n'
+    fi
+    return 0
+}
+
+list_mise_line() {
+    command_exists mise || { printf 'mise: not installed\n'; return 0; }
+    local out rc=0
+    out="$(mise ls --installed --no-header 2>/dev/null)" || rc=1
+    if [[ $rc -ne 0 ]]; then
+        printf 'mise: failed\n'
+        return 1
+    fi
+    local items
+    if [[ "$LIST_VERSIONS" == true ]]; then
+        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^(Plugin|Tool|Name|Package)$/ {print $1, $2}' | sort -u | list_join_commas)"
+    else
+        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^(Plugin|Tool|Name|Package)$/ {print $1}' | sort -u | list_join_commas)"
+    fi
+    list_emit "mise" "$items"
+    return 0
+}
+
+list_pipx_line() {
+    command_exists pipx || { printf 'pipx: not installed\n'; return 0; }
+    local out rc=0
+    out="$(pipx list --short 2>/dev/null)" || rc=1
+    if [[ $rc -ne 0 ]]; then
+        printf 'pipx: failed\n'
+        return 1
+    fi
+    local -A versions=()
+    local name ver
+    while IFS=$'\t' read -r name ver; do
+        [[ -n "$name" ]] && versions["$name"]="$ver"
+    done < <(printf '%s\n' "$out" | awk 'NF>=2 && $2~/^[0-9]/ {printf "%s\t%s\n", $1, $2}')
+    list_emit_assoc "pipx" versions
+    return 0
+}
+
+list_npm_line() {
+    command_exists npm || { printf 'npm: not installed\n'; return 0; }
+    local out rc=0
+    out="$(npm list -g --depth=0 2>/dev/null)" || rc=1
+    if [[ $rc -ne 0 ]]; then
+        printf 'npm: failed\n'
+        return 1
+    fi
+    local -A versions=()
+    parse_npm_tree versions <<< "$out"
+    list_emit_assoc "npm" versions
+    return 0
+}
+
+list_pnpm_line() {
+    command_exists pnpm || { printf 'pnpm: not installed\n'; return 0; }
+    local out rc=0
+    out="$(pnpm list -g --depth=0 2>/dev/null)" || rc=1
+    if [[ $rc -ne 0 ]]; then
+        printf 'pnpm: failed\n'
+        return 1
+    fi
+    local -A versions=()
+    parse_pnpm_tree versions <<< "$out"
+    list_emit_assoc "pnpm" versions
+    return 0
+}
+
+list_bun_line() {
+    command_exists bun || { printf 'Bun: not installed\n'; return 0; }
+    local workdir errfile out err rc=0
+    # Mirror the Bun updater: list globals from a fresh temp directory so a
+    # local lockfile/project context cannot break or pollute the inventory.
+    workdir="$(mktemp -d "/tmp/update-all-list-bun.XXXXXX")"
+    errfile="$(mktemp "/tmp/update-all-list-bun.err.XXXXXX")"
+    out="$(cd "$workdir" && bun pm ls -g 2>"$errfile")" || rc=$?
+    err="$(<"$errfile")"
+    rm -rf "$workdir" "$errfile"
+    if [[ $rc -ne 0 ]]; then
+        # Bun's empty-global state emits "Lockfile not found" and exits 1; treat
+        # that as an empty inventory rather than a collector failure.
+        if [[ "$err" == *"Lockfile not found"* ]]; then
+            printf 'Bun: none\n'
+            return 0
+        fi
+        printf 'Bun: failed\n'
+        return 1
+    fi
+    local -A versions=()
+    parse_bun_tree versions <<< "$out"
+    list_emit_assoc "Bun" versions
+    return 0
+}
+
+list_uv_line() {
+    command_exists uv || { printf 'uv: not installed\n'; return 0; }
+    local out rc=0
+    out="$(uv tool list 2>/dev/null)" || rc=1
+    if [[ $rc -ne 0 ]]; then
+        printf 'uv: failed\n'
+        return 1
+    fi
+    local items
+    if [[ "$LIST_VERSIONS" == true ]]; then
+        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^-/ && $2~/^v?[0-9]/ {print $1, $2}' | sort -u | list_join_commas)"
+    else
+        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^-/ && $2~/^v?[0-9]/ {print $1}' | sort -u | list_join_commas)"
+    fi
+    list_emit "uv" "$items"
+    return 0
+}
+
+list_custom_commands_lines() {
+    if [[ "$SKIP_COMMANDS" == true ]]; then
+        printf 'custom commands: skipped\n'
+        return 0
+    fi
+    if [[ ! -f "$COMMANDS_FILE" ]] || ! custom_commands_has_entries "$COMMANDS_FILE"; then
+        printf 'custom commands: none\n'
+        return 0
+    fi
+    local line trimmed i=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        trimmed="$(_custom_commands_trim "$line")"
+        [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+        i=$((i + 1))
+        printf 'custom command %02d: %s\n' "$i" "$trimmed"
+    done < "$COMMANDS_FILE"
+    return 0
+}
+
+run_list() {
+    local failures=0
+    if [[ "$LIST_SKIP_BREW" != true ]]; then
+        list_homebrew_line || failures=1
+    fi
+    list_macos_line
+    list_mise_line || failures=1
+    list_pipx_line || failures=1
+    list_npm_line || failures=1
+    list_pnpm_line || failures=1
+    list_bun_line || failures=1
+    list_uv_line || failures=1
+    list_custom_commands_lines
+    return $failures
+}
+
+run_list_dispatch() {
+    LIST_MODE=true
+    LIST_VERSIONS=false
+    LIST_SKIP_BREW=false
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --versions) LIST_VERSIONS=true ;;
+            --skip-brew) LIST_SKIP_BREW=true ;;
+            --commands-file)
+                shift
+                [[ $# -gt 0 ]] || { echo "--commands-file requires a path" >&2; exit 1; }
+                COMMANDS_FILE="$1"
+                ;;
+            --skip-commands) SKIP_COMMANDS=true ;;
+            --help|-h)
+                cat <<EOF
+Usage: $SCRIPT_NAME list [options]
+
+List installed items for each package manager in update order.
+
+Options:
+  --versions           Show versions alongside item names.
+  --skip-brew          Omit Homebrew entirely.
+  --commands-file PATH Use a custom commands file (default: $SCRIPT_DIR/update-all.commands)
+  --skip-commands      Do not list custom commands.
+  --help, -h           Show this help
+EOF
+                exit 0
+                ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+        esac
+        shift
+    done
+    setup_environment
+    run_list
+}
+
 # --- MAIN EXECUTION ---
 
 main() {
     set +e
+
+    if [[ "${1:-}" == "list" ]]; then
+        shift
+        run_list_dispatch "$@"
+        return $?
+    fi
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -287,14 +539,18 @@ main() {
             --help|-h)
                 cat <<EOF
 Usage: $SCRIPT_NAME [options]
+       $SCRIPT_NAME list [options]
 
 Options:
   --dry-run            Print commands without executing
   --verbose            Print commands as they run
   --force              Force run even if lock exists
   --commands-file PATH Use a custom commands file (default: $SCRIPT_DIR/update-all.commands)
-  --skip-commands       Disable running custom commands
+  --skip-commands      Disable running custom commands
   --help, -h           Show this help
+
+Subcommands:
+  list                 List installed items without updating (see 'list --help')
 EOF
                 exit 0
                 ;;
@@ -312,11 +568,12 @@ EOF
 
     # 1. SETUP PHASE
     acquire_lock
-    cd "$HOME"
-    export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
-    export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
-    if command_exists mise; then eval "$(mise activate bash)"; fi
-    export PATH="$PNPM_HOME:$PATH"
+    REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
+    if [[ ! -d "$REPORT_DIR" ]]; then
+        echo "Failed to create report directory. Exiting." >&2
+        exit 1
+    fi
+    setup_environment
 
     global_packages_snapshot "$REPORT_DIR"
     configure_tool_runner
