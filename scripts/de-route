@@ -1,0 +1,61 @@
+#!/bin/sh
+# de-route -- deliver a DECIDE/EXECUTE handoff prompt to the sibling pane.
+#
+# Usage:
+#   de-route [--resolve] <decide|execute> [text]   # text defaults to "go"
+#
+# Resolves the sibling pane by its role label within the caller's Herdr
+# workspace, then prompts that pane's agent. A pane ID is always a valid
+# agent-command target, so this works even when agents carry no custom name.
+#
+#   --resolve   print the resolved pane ID only; send no prompt.
+#
+# Fails for: not inside Herdr, an invalid role, or a role label that resolves to
+# zero or more than one pane. No fallback routing, configuration, or state.
+
+set -eu
+
+resolve=0
+case "${1:-}" in
+  --resolve) resolve=1; shift ;;
+esac
+
+role="${1:-}"
+case "$role" in
+  decide|execute) : ;;
+  '') echo 'usage: de-route [--resolve] <decide|execute> [text]' >&2; exit 2 ;;
+  *) echo "de-route: role must be 'decide' or 'execute' (got: $role)" >&2; exit 2 ;;
+esac
+
+text='go'
+[ $# -ge 2 ] && text="$2"
+
+command -v jq >/dev/null 2>&1 || { echo 'de-route: jq not in PATH' >&2; exit 1; }
+
+# Scope the search to the caller's workspace in the current Herdr session.
+ws=$(herdr pane current --current 2>/dev/null \
+  | jq -r '.result.pane.workspace_id // empty' 2>/dev/null || true)
+[ -n "$ws" ] || { echo 'de-route: not inside a Herdr session (no current workspace)' >&2; exit 1; }
+
+# Exactly one pane in this workspace must carry the requested role label.
+panes=$(herdr pane list --workspace "$ws" 2>/dev/null \
+  | jq --arg label "$role" '[.result.panes[]? | select(.label == $label) | .pane_id]' 2>/dev/null || true)
+count=0
+if [ -n "$panes" ]; then
+  count=$(printf '%s' "$panes" | jq 'length' 2>/dev/null) || count=0
+fi
+if [ "$count" -ne 1 ]; then
+  echo "de-route: label '$role' matched $count pane(s) in workspace $ws; expected exactly one" >&2
+  exit 1
+fi
+target=$(printf '%s' "$panes" | jq -r '.[0]')
+case "$target" in
+  ''|null) echo "de-route: could not resolve pane id for '$role'" >&2; exit 1 ;;
+esac
+
+if [ "$resolve" -eq 1 ]; then
+  printf '%s\n' "$target"
+  exit 0
+fi
+
+exec herdr agent prompt "$target" "$text"
