@@ -159,7 +159,7 @@ EOF
 if [[ "${1:-}" == "pm" && "${2:-}" == "ls" && "${3:-}" == "-g" ]]; then
   [[ -n "${FAKE_BUN_PWD_FILE:-}" ]] && printf '%s\n' "$PWD" > "$FAKE_BUN_PWD_FILE"
   if [[ "${FAKE_BUN_NOLOCKFILE:-}" == 1 ]]; then
-    echo "error: Lockfile not found" >&2
+    echo "error: ${FAKE_BUN_NOLOCKFILE_MSG:-Lockfile not found}" >&2
     exit 1
   fi
   [[ "${FAKE_BUN_FAIL:-}" == 1 ]] && exit 1
@@ -507,8 +507,8 @@ test_pnpm_global_bin_on_path() {
 }
 
 test_bun_lockfile_missing_is_none() {
-  # Bun's empty-global state: `bun pm ls -g` exits 1 with "Lockfile not found".
-  # That is an empty inventory, not a collector failure.
+  # Bun's empty-global state: `bun pm ls -g` exits 1 with "Lockfile not found"
+  # (older Bun). That is an empty inventory, not a collector failure.
   local case_dir="$tmp/bunlock"
   local out="$tmp/bunlock.out"
   setup_case "$case_dir"
@@ -517,6 +517,24 @@ test_bun_lockfile_missing_is_none() {
   local rc=$?
   set -e
   [[ $rc -eq 0 ]] || fail "expected exit status 0 for bun lockfile-missing, got $rc"
+  local text
+  text="$(cat "$out")"
+  assert_contains "$text" "Bun:"
+  assert_equals "$(body_after "$text" "Bun:")" "  ·  none"
+}
+
+test_bun_missing_lockfile_message_is_none() {
+  # Newer Bun (e.g. 1.4.0) words the empty-global state as
+  # "missing lockfile, nothing to list"; it must also read as "none".
+  local case_dir="$tmp/bunlockmsg"
+  local out="$tmp/bunlockmsg.out"
+  setup_case "$case_dir"
+  set +e
+  FAKE_BUN_NOLOCKFILE=1 FAKE_BUN_NOLOCKFILE_MSG="missing lockfile, nothing to list" \
+    run_list_rc "$case_dir" "$out" list
+  local rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || fail "expected exit status 0 for bun missing-lockfile message, got $rc"
   local text
   text="$(cat "$out")"
   assert_contains "$text" "Bun:"
@@ -592,6 +610,7 @@ test_collector_failures_reported
 test_bun_uses_temp_working_directory
 test_pnpm_global_bin_on_path
 test_bun_lockfile_missing_is_none
+test_bun_missing_lockfile_message_is_none
 test_list_preserves_foreign_lock
 
 echo "PASS"

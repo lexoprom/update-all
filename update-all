@@ -430,9 +430,10 @@ list_bun_line() {
     err="$(<"$errfile")"
     rm -rf "$workdir" "$errfile"
     if [[ $rc -ne 0 ]]; then
-        # Bun's empty-global state emits "Lockfile not found" and exits 1; treat
-        # that as an empty inventory rather than a collector failure.
-        if [[ "$err" == *"Lockfile not found"* ]]; then
+        # Bun's empty-global state exits 1 with "Lockfile not found" (older
+        # Bun) or "missing lockfile, nothing to list" (newer Bun, e.g. 1.4.0);
+        # treat both as an empty inventory rather than a collector failure.
+        if [[ "$err" == *"Lockfile not found"* || "$err" == *"missing lockfile"* ]]; then
             list_emit "Bun" "none"
             return 0
         fi
