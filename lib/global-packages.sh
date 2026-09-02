@@ -128,7 +128,7 @@ _global_packages_npm_run() {
     fi
 
     local -a packages=()
-    readarray -t packages < <(map_to_latest old_versions npm)
+    readarray -t packages < <(map_to_latest old_versions)
 
     if [[ ${#packages[@]} -eq 0 ]]; then
         echo "No global npm packages detected."
