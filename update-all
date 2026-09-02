@@ -282,7 +282,7 @@ setup_environment() {
     export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
     export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
     if command_exists mise; then eval "$(mise activate bash)"; fi
-    export PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
+    export PATH="$PNPM_HOME/bin:$PATH"
 }
 
 # --- LIST COMMAND ---
