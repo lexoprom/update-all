@@ -105,10 +105,16 @@ _global_packages_npm_run() {
     local report_dir="$1"
     local log_file="$report_dir/npm_install.log"
     local baseline_file="$report_dir/$GLOBAL_PACKAGES_NPM_BASELINE_FILE"
+    local current_file="$report_dir/npm_globals.current"
+    local current_err="$report_dir/npm_globals.current.err"
 
     declare -A old_versions=()
     declare -A current_versions=()
-    parse_npm_tree current_versions < <(npm list -g --depth=0 2>/dev/null)
+    if ! npm list -g --depth=0 > "$current_file" 2> "$current_err"; then
+        _global_packages_log_failure "$current_err" "⚠️ npm global package list failed. Details:"
+        return 1
+    fi
+    parse_npm_tree current_versions < "$current_file"
 
     local name
     for name in "${!current_versions[@]}"; do
@@ -138,15 +144,44 @@ _global_packages_npm_run() {
     if [[ ${#missing_from_current[@]} -gt 0 ]]; then
         echo "Restoring npm globals missing after runtime switch: ${missing_from_current[*]}"
     fi
+    : > "$log_file"
+
+    if _global_packages_command_exists mise; then
+        local -a mise_specs=()
+        local package
+        for package in "${packages[@]}"; do
+            [[ "$package" == "npm@latest" || "$package" == "corepack@latest" ]] && continue
+            mise_specs+=("npm:$package")
+        done
+
+        if [[ ${#mise_specs[@]} -gt 0 ]]; then
+            echo "Updating npm globals with mise: ${mise_specs[*]}"
+            if ! mise use --global --yes --fuzzy "${mise_specs[@]}" >> "$log_file" 2>&1; then
+                _global_packages_log_failure "$log_file" "⚠️ mise npm package update failed. Details:"
+                return 1
+            fi
+            if ! mise reshim >> "$log_file" 2>&1; then
+                _global_packages_log_failure "$log_file" "⚠️ mise reshim failed after npm package update. Details:"
+                return 1
+            fi
+        fi
+    fi
+
     echo "Updating npm globals: ${packages[*]}"
-    if npm install -g "${packages[@]}" > "$log_file" 2>&1; then
-        declare -A new_versions=()
-        parse_npm_tree new_versions < <(npm list -g --depth=0 2>/dev/null)
-        print_version_diff old_versions new_versions
-    else
+    if ! npm install -g "${packages[@]}" >> "$log_file" 2>&1; then
         _global_packages_log_failure "$log_file" "⚠️ npm update failed. Details:"
         return 1
     fi
+
+    local after_file="$report_dir/npm_globals.after"
+    local after_err="$report_dir/npm_globals.after.err"
+    if ! npm list -g --depth=0 > "$after_file" 2> "$after_err"; then
+        _global_packages_log_failure "$after_err" "⚠️ npm global package list failed after update. Details:"
+        return 1
+    fi
+    declare -A new_versions=()
+    parse_npm_tree new_versions < "$after_file"
+    print_version_diff old_versions new_versions
 }
 
 _global_packages_pnpm_installed() { _global_packages_command_exists pnpm; }
