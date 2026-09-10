@@ -144,31 +144,8 @@ _global_packages_npm_run() {
     if [[ ${#missing_from_current[@]} -gt 0 ]]; then
         echo "Restoring npm globals missing after runtime switch: ${missing_from_current[*]}"
     fi
-    : > "$log_file"
-
-    if _global_packages_command_exists mise; then
-        local -a mise_specs=()
-        local package
-        for package in "${packages[@]}"; do
-            [[ "$package" == "npm@latest" || "$package" == "corepack@latest" ]] && continue
-            mise_specs+=("npm:$package")
-        done
-
-        if [[ ${#mise_specs[@]} -gt 0 ]]; then
-            echo "Updating npm globals with mise: ${mise_specs[*]}"
-            if ! mise use --global --yes --fuzzy "${mise_specs[@]}" >> "$log_file" 2>&1; then
-                _global_packages_log_failure "$log_file" "⚠️ mise npm package update failed. Details:"
-                return 1
-            fi
-            if ! mise reshim >> "$log_file" 2>&1; then
-                _global_packages_log_failure "$log_file" "⚠️ mise reshim failed after npm package update. Details:"
-                return 1
-            fi
-        fi
-    fi
-
     echo "Updating npm globals: ${packages[*]}"
-    if ! npm install -g "${packages[@]}" >> "$log_file" 2>&1; then
+    if ! npm install -g "${packages[@]}" > "$log_file" 2>&1; then
         _global_packages_log_failure "$log_file" "⚠️ npm update failed. Details:"
         return 1
     fi

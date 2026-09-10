@@ -103,7 +103,6 @@ if [[ -n "$record_file" ]]; then
 fi
 case "${1:-}" in
   use) exit "${FAKE_MISE_USE_EXIT_CODE:-0}" ;;
-  reshim) exit "${FAKE_MISE_RESHIM_EXIT_CODE:-0}" ;;
 esac
 exit 0
 EOF
@@ -273,7 +272,7 @@ clear_fake_env() {
   unset FAKE_PIPX_OUTPUT FAKE_PIPX_EXIT_CODE
   unset FAKE_NPM_STATE_FILE FAKE_NPM_LIST_OUTPUT FAKE_NPM_NEXT_LIST_OUTPUT FAKE_NPM_RECORD_FILE FAKE_NPM_INSTALL_EXIT_CODE
   unset FAKE_NPM_EXECUTABLE
-  unset FAKE_NPM_LIST_EXIT_CODE FAKE_MISE_RECORD_FILE FAKE_MISE_USE_EXIT_CODE FAKE_MISE_RESHIM_EXIT_CODE
+  unset FAKE_NPM_LIST_EXIT_CODE FAKE_MISE_RECORD_FILE FAKE_MISE_USE_EXIT_CODE
   unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE FAKE_PNPM_LIST_COUNT_FILE FAKE_PNPM_LIST_FAIL_AT FAKE_PNPM_LIST_FAIL_FIRST FAKE_NPX_RECORD_FILE FAKE_NPX_EXIT_CODE FAKE_NPX_STDERR
   unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
   unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
@@ -357,7 +356,7 @@ test_npm_globals_restore_from_baseline_after_runtime_switch() {
   clear_fake_env
 }
 
-test_npm_globals_mise_uses_backend_and_restores_baseline() {
+test_npm_globals_with_mise_restore_through_npm_only() {
   local case_dir="$tmp/npm-mise"
   setup_case "$case_dir"
   create_fake_npm "$case_dir/bin"
@@ -375,12 +374,7 @@ test_npm_globals_mise_uses_backend_and_restores_baseline() {
   assert_eq "0" "$TEST_EXIT_CODE" "npm mise exit"
   assert_eq "✅ Success" "${TEST_RESULT[status.npm]}" "npm mise status"
   local record=""
-  [[ -f "$case_dir/mise-record.txt" ]] && record="$(< "$case_dir/mise-record.txt")"
-  assert_contains "$record" "npm:typescript@latest"
-  assert_contains "$record" "npm:@earendil-works/pi-coding-agent@latest"
-  assert_contains "$record" "args=reshim"
-  assert_not_contains "$record" "npm:npm@latest"
-  assert_not_contains "$record" "npm:corepack@latest"
+  [[ ! -e "$case_dir/mise-record.txt" ]] || fail "npm globals invoked mise"
   record="$(< "$case_dir/npm-record.txt")"
   assert_contains "$record" "install -g"
   assert_contains "$record" "typescript@latest"
@@ -432,49 +426,6 @@ test_npm_globals_mise_manager_only_still_updates_npm() {
   assert_contains "$record" "npm@latest"
   assert_contains "$record" "corepack@latest"
   [[ ! -e "$FAKE_MISE_RECORD_FILE" ]] || fail "mise ran with empty specs"
-  clear_fake_env
-}
-
-test_npm_globals_mise_failures_propagate() {
-  local case_dir="$tmp/npm-mise-fail"
-  setup_case "$case_dir"
-  create_fake_npm "$case_dir/bin"
-  create_fake_mise "$case_dir/bin"
-
-  export FAKE_NPM_STATE_FILE="$case_dir/npm-state.txt"
-  export FAKE_MISE_RECORD_FILE="$case_dir/mise-record.txt"
-  export FAKE_MISE_USE_EXIT_CODE=17
-  printf '%s\n' '/fake/lib' '└── typescript@5.8.2' > "$FAKE_NPM_STATE_FILE"
-
-  run_global_packages "$case_dir" false npm
-
-  assert_ne "0" "$TEST_EXIT_CODE" "npm mise failure exit"
-  assert_eq "❌ Failed" "${TEST_RESULT[status.npm]}" "npm mise failure status"
-  assert_contains "$TEST_OUTPUT" "mise npm package update failed"
-  local record=""
-  [[ -f "$case_dir/mise-record.txt" ]] && record="$(< "$case_dir/mise-record.txt")"
-  assert_not_contains "$record" "args=reshim"
-
-  clear_fake_env
-}
-
-test_npm_globals_mise_reshim_failure_propagates() {
-  local case_dir="$tmp/npm-reshim-fail"
-  setup_case "$case_dir"
-  create_fake_npm "$case_dir/bin"
-  create_fake_mise "$case_dir/bin"
-
-  export FAKE_NPM_STATE_FILE="$case_dir/npm-state.txt"
-  export FAKE_MISE_RECORD_FILE="$case_dir/mise-record.txt"
-  export FAKE_MISE_RESHIM_EXIT_CODE=17
-  printf '%s\n' '/fake/lib' '└── typescript@5.8.2' > "$FAKE_NPM_STATE_FILE"
-
-  run_global_packages "$case_dir" false npm
-
-  assert_ne "0" "$TEST_EXIT_CODE" "npm reshim failure exit"
-  assert_eq "❌ Failed" "${TEST_RESULT[status.npm]}" "npm reshim failure status"
-  assert_contains "$TEST_OUTPUT" "mise reshim failed"
-
   clear_fake_env
 }
 
@@ -759,11 +710,9 @@ trap cleanup EXIT
 test_pipx_updates_reported_at_boundary
 test_npm_globals_install_latest_at_boundary
 test_npm_globals_restore_from_baseline_after_runtime_switch
-test_npm_globals_mise_uses_backend_and_restores_baseline
+test_npm_globals_with_mise_restore_through_npm_only
 test_npm_globals_mise_updates_selected_npm_executable
 test_npm_globals_mise_manager_only_still_updates_npm
-test_npm_globals_mise_failures_propagate
-test_npm_globals_mise_reshim_failure_propagates
 test_npm_globals_mise_list_failure_propagates
 test_npm_globals_mise_dry_run_skips_commands
 test_pnpm_globals_update_latest_at_boundary
