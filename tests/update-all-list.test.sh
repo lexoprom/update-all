@@ -200,6 +200,7 @@ setup_case() {
   cp ./lib/custom-commands.sh "$case_dir/lib/custom-commands.sh"
   cp ./lib/tool-runner.sh "$case_dir/lib/tool-runner.sh"
   cp ./lib/pm-helpers.sh "$case_dir/lib/pm-helpers.sh"
+  cp ./lib/doctor.py "$case_dir/lib/doctor.py"
   chmod +x "$case_dir/update-all"
   make_fake_cmds "$case_dir/bin"
 }

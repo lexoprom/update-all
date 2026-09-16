@@ -54,6 +54,8 @@ COMMANDS_FILE=""
 LIST_VERSIONS=false
 LIST_SKIP_BREW=false
 LIST_MODE=false
+HISTORY_ACTIVE=false
+HISTORY_PYTHON=""
 
 resolve_script_path() {
     local path="$1"
@@ -90,6 +92,9 @@ readonly NC='\033[0m'
 # Cleanup on exit
 cleanup() {
     local exit_code=$?
+    if [[ "$HISTORY_ACTIVE" == true ]]; then
+        "$HISTORY_PYTHON" "$SCRIPT_DIR/lib/doctor.py" interrupt "$REPORT_DIR" >/dev/null 2>&1 || true
+    fi
     # Only remove a lock this process actually acquired, and only if it still
     # holds our PID: `list`/`list --help` never acquire a lock, and a forced
     # takeover may have since replaced it with another process's PID.
@@ -106,7 +111,9 @@ cleanup() {
     fi
     exit $exit_code
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Utility functions
 command_exists() { command -v "$1" >/dev/null 2>&1; }
@@ -281,7 +288,7 @@ setup_environment() {
     cd "$HOME"
     export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
     export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
-    if command_exists mise; then eval "$(mise activate bash)"; fi
+    if [[ "${1:-}" != doctor ]] && command_exists mise; then eval "$(mise activate bash)"; fi
     export PATH="$PNPM_HOME/bin:$PATH"
 }
 
@@ -538,9 +545,83 @@ EOF
 
 # --- MAIN EXECUTION ---
 
+run_doctor_dispatch() {
+    # Diagnostic findings are ordinary results, not script aborts.
+    LIST_MODE=true
+    local arg lock_pid doctor_python candidate
+    for arg in "$@"; do
+        case "$arg" in
+            --offline|--verbose) ;;
+            --help|-h)
+                cat <<EOF
+Usage: $SCRIPT_NAME doctor [--offline] [--verbose]
+
+Check managed tools, global packages, PATH, cleanup candidates and the last update.
+Reports recommendations without installing, repairing or removing packages.
+Online checks may refresh metadata and caches. Requires Python 3.
+
+  --offline   Skip network checks; inspect local installations and history only.
+  --verbose   Show commands and full diagnostic output.
+  --help, -h  Show this help.
+
+Exit codes: 0 healthy, 1 findings or incomplete checks, 2 usage/startup failure.
+History: \${XDG_STATE_HOME:-\$HOME/.local/state}/update-all/last-run.json
+EOF
+                return 0 ;;
+            *) echo "Unknown doctor option: $arg" >&2; return 2 ;;
+        esac
+    done
+    if [[ -f "$LOCK_FILE" ]]; then
+        lock_pid="$(cat "$LOCK_FILE" 2>/dev/null)"
+        if [[ "$lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            echo "Doctor unavailable: update-all is running (PID: $lock_pid). Retry after it finishes." >&2
+            return 2
+        fi
+    fi
+    export UPDATE_ALL_ORIGINAL_PATH="$PATH"
+    doctor_python="$(command -v python3 || true)"
+    # Bootstrap without invoking mise shims: those can install or prune tools.
+    if [[ -z "$doctor_python" || "$doctor_python" == */shims/* ]]; then
+        doctor_python=""
+        for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+            if [[ -x "$candidate" ]]; then doctor_python="$candidate"; break; fi
+        done
+    fi
+    setup_environment doctor
+    if [[ -z "$doctor_python" ]]; then
+        echo "Doctor requires Python 3. Install Python 3 and retry." >&2
+        return 2
+    fi
+    "$doctor_python" "$SCRIPT_DIR/lib/doctor.py" doctor "$@"
+}
+
+history_start() {
+    [[ "$DRY_RUN" == false ]] || return 0
+    HISTORY_PYTHON="$(command -v python3 || true)"
+    if [[ -n "$HISTORY_PYTHON" ]] && "$HISTORY_PYTHON" "$SCRIPT_DIR/lib/doctor.py" start "$REPORT_DIR"; then
+        HISTORY_ACTIVE=true
+    else
+        echo "Warning: update history could not be saved; updates will continue." >&2
+    fi
+}
+
+history_finish() {
+    [[ "$HISTORY_ACTIVE" == true ]] || return 0
+    if "$HISTORY_PYTHON" "$SCRIPT_DIR/lib/doctor.py" finish "$REPORT_DIR"; then
+        HISTORY_ACTIVE=false
+    else
+        echo "Warning: update history could not be finalized." >&2
+    fi
+}
+
 main() {
     set +e
 
+    if [[ "${1:-}" == doctor ]]; then
+        shift
+        run_doctor_dispatch "$@"
+        return $?
+    fi
     if [[ "${1:-}" == "list" ]]; then
         shift
         run_list_dispatch "$@"
@@ -562,6 +643,7 @@ main() {
                 cat <<EOF
 Usage: $SCRIPT_NAME [options]
        $SCRIPT_NAME list [options]
+       $SCRIPT_NAME doctor [options]
 
 Options:
   --dry-run            Print commands without executing
@@ -573,6 +655,7 @@ Options:
 
 Subcommands:
   list                 List installed items without updating (see 'list --help')
+  doctor               Diagnose installations and the last update (see 'doctor --help')
 EOF
                 exit 0
                 ;;
@@ -597,9 +680,13 @@ EOF
     fi
     setup_environment
 
+    history_start
     global_packages_snapshot "$REPORT_DIR"
     configure_tool_runner
     tool_runner_execute "$REPORT_DIR" show_progress
+    local update_rc=$?
+    history_finish
+    return "$update_rc"
 }
 
 [[ "${DEBUG:-}" == "true" ]] && set -x

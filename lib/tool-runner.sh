@@ -76,6 +76,9 @@ _tool_runner_run() {
     set +e
     _tool_runner_call_if_defined "${TOOL_RUNNER_RUN_FNS[$id]-}"
     exit_code=$?
+    if [[ -n "${REPORT_DIR:-}" && -d "$REPORT_DIR" ]]; then
+        printf '%s\t%s\n' "$id" "$exit_code" >> "$REPORT_DIR/stages.tsv"
+    fi
     if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
     return "$exit_code"
 }

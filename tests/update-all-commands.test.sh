@@ -133,6 +133,7 @@ setup_case() {
   cp ./lib/custom-commands.sh "$case_dir/lib/custom-commands.sh"
   cp ./lib/tool-runner.sh "$case_dir/lib/tool-runner.sh"
   cp ./lib/pm-helpers.sh "$case_dir/lib/pm-helpers.sh"
+  cp ./lib/doctor.py "$case_dir/lib/doctor.py"
   chmod +x "$case_dir/update-all"
   make_fake_cmds "$case_dir/bin"
 }
@@ -140,7 +141,7 @@ setup_case() {
 run_case() {
   local case_dir="$1"
   shift
-  HOME="$case_dir/home" PATH="$case_dir/bin:/usr/bin:/bin" "$case_dir/update-all" "$@" 2>&1 | strip_ansi
+  HOME="$case_dir/home" XDG_STATE_HOME="$case_dir/home/.local/state" PATH="$case_dir/bin:/usr/bin:/bin" "$case_dir/update-all" "$@" 2>&1 | strip_ansi
 }
 
 test_default_commands_file_runs_last() {
