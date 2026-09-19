@@ -19,6 +19,19 @@ _global_packages_command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+_global_packages_execute() {
+    # The updater provides the watchdog; keep standalone library use working.
+    if declare -F run_with_timeout >/dev/null; then
+        local exit_code=0
+        run_with_timeout "${TOOL_TIMEOUT_SECONDS:-3600}" "$@" || exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            printf 'Timed out after %ss: %s\n' "${TOOL_TIMEOUT_SECONDS:-3600}" "$*" >&2
+        fi
+        return "$exit_code"
+    fi
+    "$@"
+}
+
 _global_packages_label() {
     printf '%s' "${GLOBAL_PACKAGES_LABELS[$1]:-$1 packages}"
 }
@@ -81,7 +94,11 @@ global_packages_snapshot() {
     [[ -d "$report_dir" ]] || return 0
     _global_packages_command_exists npm || return 0
 
-    npm list -g --depth=0 > "$npm_baseline" 2>/dev/null || true
+    local exit_code=0
+    _global_packages_execute npm list -g --depth=0 > "$npm_baseline" 2>/dev/null || exit_code=$?
+    if [[ $exit_code -eq 124 ]]; then
+        rm -f "$npm_baseline"
+    fi
     if [[ ! -s "$npm_baseline" ]]; then
         rm -f "$npm_baseline"
     fi
@@ -92,7 +109,7 @@ _global_packages_pipx_run() {
     local report_dir="$1"
     local log_file="$report_dir/pipx.log"
 
-    if pipx upgrade-all > "$log_file" 2>&1; then
+    if _global_packages_execute pipx upgrade-all > "$log_file" 2>&1; then
         parse_pipx_output < "$log_file"
     else
         _global_packages_log_failure "$log_file" "⚠️ Pipx upgrade failed. Details:"
@@ -110,7 +127,7 @@ _global_packages_npm_run() {
 
     declare -A old_versions=()
     declare -A current_versions=()
-    if ! npm list -g --depth=0 > "$current_file" 2> "$current_err"; then
+    if ! _global_packages_execute npm list -g --depth=0 > "$current_file" 2> "$current_err"; then
         _global_packages_log_failure "$current_err" "⚠️ npm global package list failed. Details:"
         return 1
     fi
@@ -145,14 +162,14 @@ _global_packages_npm_run() {
         echo "Restoring npm globals missing after runtime switch: ${missing_from_current[*]}"
     fi
     echo "Updating npm globals: ${packages[*]}"
-    if ! npm install -g "${packages[@]}" > "$log_file" 2>&1; then
+    if ! _global_packages_execute npm install -g "${packages[@]}" > "$log_file" 2>&1; then
         _global_packages_log_failure "$log_file" "⚠️ npm update failed. Details:"
         return 1
     fi
 
     local after_file="$report_dir/npm_globals.after"
     local after_err="$report_dir/npm_globals.after.err"
-    if ! npm list -g --depth=0 > "$after_file" 2> "$after_err"; then
+    if ! _global_packages_execute npm list -g --depth=0 > "$after_file" 2> "$after_err"; then
         _global_packages_log_failure "$after_err" "⚠️ npm global package list failed after update. Details:"
         return 1
     fi
@@ -174,12 +191,12 @@ _global_packages_pnpm_run() {
     # pnpm packages detected." When the list fails, bootstrap pnpm via npm/npx
     # (the same recovery command as update-all.commands) and retry exactly once
     # before giving up.
-    if ! pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
-        if ! pnpm_config_pm_on_fail=ignore npx --yes pnpm@latest-11 self-update > "$recovery_log" 2>&1; then
+    if ! _global_packages_execute pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
+        if ! pnpm_config_pm_on_fail=ignore _global_packages_execute npx --yes pnpm@latest-11 self-update > "$recovery_log" 2>&1; then
             _global_packages_log_failure "$recovery_log" "⚠️ pnpm recovery failed. Details:"
             return 1
         fi
-        if ! pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
+        if ! _global_packages_execute pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
             _global_packages_log_failure "$before_err" "⚠️ pnpm global package list failed after recovery. Details:"
             return 1
         fi
@@ -207,13 +224,13 @@ _global_packages_pnpm_run() {
     fi
 
     echo "Updating pnpm globals: ${packages[*]}"
-    if pnpm update -g --latest "${packages[@]}" > "$log_file" 2>&1 &&
-        pnpm approve-builds -g --all >> "$log_file" 2>&1; then
+    if _global_packages_execute pnpm update -g --latest "${packages[@]}" > "$log_file" 2>&1 &&
+        _global_packages_execute pnpm approve-builds -g --all >> "$log_file" 2>&1; then
         local after_list="$report_dir/pnpm_list_after.txt"
         local after_err="$report_dir/pnpm_list_after.err"
         # Re-check the post-update list too: a pnpm failure here must not be
         # silently read as "no version changes".
-        if ! pnpm list -g --depth=0 > "$after_list" 2> "$after_err"; then
+        if ! _global_packages_execute pnpm list -g --depth=0 > "$after_list" 2> "$after_err"; then
             _global_packages_log_failure "$after_err" "⚠️ pnpm global package list failed after update. Details:"
             return 1
         fi
@@ -236,7 +253,21 @@ _global_packages_bun_run() {
     workdir="$(mktemp -d "/tmp/global-packages-bun.XXXXXX")"
 
     declare -A old_versions=()
-    parse_bun_tree old_versions < <(cd "$workdir" && bun pm ls -g 2>/dev/null)
+    if (cd "$workdir" && _global_packages_execute bun pm ls -g) > "$report_dir/bun_globals.before" 2> "$log_file"; then
+        parse_bun_tree old_versions < "$report_dir/bun_globals.before"
+    else
+        exit_code=$?
+        # Bun has no global lockfile until global packages have been installed.
+        if [[ $exit_code -ne 124 && ! -s "$report_dir/bun_globals.before" ]] &&
+            grep -Fxq 'error: missing lockfile, nothing to list' "$log_file"; then
+            echo "No global Bun packages detected."
+            rm -rf "$workdir"
+            return 0
+        fi
+        _global_packages_log_failure "$log_file" "⚠️ Bun global package list failed. Details:"
+        rm -rf "$workdir"
+        return 1
+    fi
 
     local -a packages=()
     readarray -t packages < <(map_to_latest old_versions)
@@ -248,10 +279,15 @@ _global_packages_bun_run() {
     fi
 
     echo "Updating Bun globals: ${packages[*]}"
-    if (cd "$workdir" && bun add -g "${packages[@]}") > "$log_file" 2>&1; then
+    if (cd "$workdir" && _global_packages_execute bun add -g "${packages[@]}") > "$log_file" 2>&1; then
         declare -A new_versions=()
-        parse_bun_tree new_versions < <(cd "$workdir" && bun pm ls -g 2>/dev/null)
-        print_version_diff old_versions new_versions
+        if (cd "$workdir" && _global_packages_execute bun pm ls -g) > "$report_dir/bun_globals.after" 2> "$log_file"; then
+            parse_bun_tree new_versions < "$report_dir/bun_globals.after"
+            print_version_diff old_versions new_versions
+        else
+            _global_packages_log_failure "$log_file" "⚠️ Bun global package list failed after update. Details:"
+            exit_code=1
+        fi
     else
         _global_packages_log_failure "$log_file" "⚠️ Bun update failed. Details:"
         exit_code=1
@@ -266,7 +302,7 @@ _global_packages_uv_run() {
     local report_dir="$1"
     local log_file="$report_dir/uv_tool_upgrade.log"
 
-    if uv tool upgrade --all > "$log_file" 2>&1; then
+    if _global_packages_execute uv tool upgrade --all > "$log_file" 2>&1; then
         cat "$log_file"
     else
         _global_packages_log_failure "$log_file" "⚠️ uv tool upgrade failed. Details:"

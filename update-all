@@ -56,6 +56,10 @@ LIST_SKIP_BREW=false
 LIST_MODE=false
 HISTORY_ACTIVE=false
 HISTORY_PYTHON=""
+# Per-command timeout in seconds; 0 disables. A wedged `brew upgrade` or
+# `softwareupdate -l` otherwise hangs the whole run forever (and keeps the
+# lock, blocking future runs). Override with UPDATE_ALL_TOOL_TIMEOUT.
+TOOL_TIMEOUT_SECONDS="${UPDATE_ALL_TOOL_TIMEOUT:-3600}"
 
 resolve_script_path() {
     local path="$1"
@@ -132,6 +136,58 @@ log_status() {
     printf '%s\t%s\n' "$component" "$status" >> "$REPORT_DIR/status.log"
 }
 
+# Snapshot descendants before signalling: exiting parents can orphan children
+# that ignore SIGTERM, so a second traversal would miss them.
+process_tree_pids() {
+    local pid="$1"
+    local child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        process_tree_pids "$child"
+    done
+    printf '%s\n' "$pid"
+}
+
+# Wait for command completion through a pipe. Returns 124 when it exceeds
+# timeout_secs; the whole process tree is terminated so orphaned children
+# cannot keep stdout open and block command substitution forever.
+run_with_timeout() (
+    local timeout_secs="$1"
+    shift
+    if [[ "$timeout_secs" -le 0 ]]; then
+        "$@"
+        return $?
+    fi
+
+    local pid exit_code=0 target
+    local -a targets=()
+    # Keep descriptor changes local to this subshell. Command output keeps
+    # going to stdout; only its exit status is sent through the completion pipe.
+    exec 3>&1
+    exec 4< <(
+        "$@" >&3 3>&- || exit_code=$?
+        printf '%s\n' "$exit_code"
+    )
+    pid=$!
+    exec 3>&-
+    if IFS= read -r -t "$timeout_secs" exit_code <&4; then
+        exec 4<&-
+        wait "$pid" 2>/dev/null || true
+        return "$exit_code"
+    fi
+
+    mapfile -t targets < <(process_tree_pids "$pid")
+    for target in "${targets[@]}"; do
+        kill -TERM "$target" 2>/dev/null || true
+    done
+    sleep 2
+    for target in "${targets[@]}"; do
+        kill -KILL "$target" 2>/dev/null || true
+    done
+    exec 4<&-
+    wait "$pid" 2>/dev/null || true
+    return 124
+)
+
 # Execute command with proper error handling and reporting
 safe_execute() {
     local description="$1"
@@ -149,7 +205,7 @@ safe_execute() {
     [[ $- == *e* ]] && previous_errexit=1
 
     set +e
-    output=$("$@" 2>&1)
+    output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" "$@" 2>&1)
     exit_code=$?
     if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
 
@@ -157,8 +213,15 @@ safe_execute() {
         log_status "$description" "✅ Success"
         [[ "$VERBOSE" = true ]] && printf '  %b✓%b  %s completed\n' "$GREEN" "$NC" "$description"
     else
-        log_status "$description" "❌ Failed (exit code: $exit_code)"
+        if [[ $exit_code -eq 124 ]]; then
+            log_status "$description" "❌ Failed (timed out after ${TOOL_TIMEOUT_SECONDS}s)"
+        else
+            log_status "$description" "❌ Failed (exit code: $exit_code)"
+        fi
         printf '  %b✗%b  %s failed (exit code %s)\n' "$RED" "$NC" "$description" "$exit_code"
+        if [[ $exit_code -eq 124 ]]; then
+            printf '     %bTimed out after %ss%b\n' "$DIM" "$TOOL_TIMEOUT_SECONDS" "$NC"
+        fi
         local cmd_str="$*"
         printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$cmd_str"
         if [[ -n "$output" ]]; then
@@ -166,6 +229,72 @@ safe_execute() {
                 printf '     %s\n' "$line"
             done <<< "$output"
         fi
+    fi
+    return $exit_code
+}
+
+# Like safe_execute, but retries failed attempts before giving up. Transient
+# failures are common for mise's npm backend (aube): large tarball downloads
+# intermittently die mid-stream with "stream error ... HTTP error: error
+# decoding response body", and a retry typically succeeds. Only the final
+# attempt's output is printed and logged, so retries don't spam the report.
+# The delay can be overridden with UPDATE_ALL_RETRY_DELAY (seconds).
+safe_execute_retry() {
+    local max_attempts="$1"
+    local delay_seconds="${UPDATE_ALL_RETRY_DELAY:-$2}"
+    local description="$3"
+    shift 3
+
+    if [[ "$DRY_RUN" = true || "$max_attempts" -le 1 ]]; then
+        safe_execute "$description" "$@"
+        return $?
+    fi
+
+    local attempt=1
+    local output exit_code
+    local previous_errexit=0
+    while :; do
+        [[ "$VERBOSE" = true ]] && printf '  %b↳%b  Executing (attempt %d/%d): %s\n' "$CYAN" "$NC" "$attempt" "$max_attempts" "$*"
+
+        [[ $- == *e* ]] && previous_errexit=1
+        set +e
+        output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" "$@" 2>&1)
+        exit_code=$?
+        if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
+
+        if [[ $exit_code -eq 0 ]]; then
+            log_status "$description" "✅ Success"
+            [[ "$VERBOSE" = true ]] && printf '  %b✓%b  %s completed\n' "$GREEN" "$NC" "$description"
+            return 0
+        fi
+
+        # Timeouts are not transient: don't burn another full timeout on a
+        # retry.
+        if (( attempt >= max_attempts )) || [[ $exit_code -eq 124 ]]; then
+            break
+        fi
+
+        attempt=$((attempt + 1))
+        printf '  %b↻%b  %s failed (exit code %s); retrying in %ss (attempt %d/%d)\n' \
+            "$YELLOW" "$NC" "$description" "$exit_code" "$delay_seconds" "$attempt" "$max_attempts"
+        sleep "$delay_seconds"
+    done
+
+    if [[ $exit_code -eq 124 ]]; then
+        log_status "$description" "❌ Failed (timed out after ${TOOL_TIMEOUT_SECONDS}s)"
+    else
+        log_status "$description" "❌ Failed (exit code: $exit_code)"
+    fi
+    printf '  %b✗%b  %s failed (exit code %s)\n' "$RED" "$NC" "$description" "$exit_code"
+    if [[ $exit_code -eq 124 ]]; then
+        printf '     %bTimed out after %ss%b\n' "$DIM" "$TOOL_TIMEOUT_SECONDS" "$NC"
+    fi
+    local cmd_str="$*"
+    printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$cmd_str"
+    if [[ -n "$output" ]]; then
+        while IFS= read -r line; do
+            printf '     %s\n' "$line"
+        done <<< "$output"
     fi
     return $exit_code
 }
@@ -199,8 +328,14 @@ update_homebrew() {
 }
 
 update_mise_tools() {
-    safe_execute "mise tool upgrades" mise upgrade --yes
-    safe_execute "mise reshim" mise reshim
+    local rc=0
+    # mise upgrade failures are usually transient registry/CDN stream errors
+    # ("HTTP error: error decoding response body"), so retry once before
+    # failing the run. Return the worst exit code so stages.tsv/history stay
+    # accurate even when reshim succeeds after a failed upgrade.
+    safe_execute_retry 2 10 "mise tool upgrades" mise upgrade --yes || rc=$?
+    safe_execute "mise reshim" mise reshim || rc=$?
+    return "$rc"
 }
 
 run_custom_command() {
@@ -225,8 +360,8 @@ check_macos_updates() {
         log_status "macOS Updates" "🔍 Dry run"
         return
     fi
-    local updates_output
-    if updates_output=$(softwareupdate -l 2>&1); then
+    local updates_output exit_code
+    if updates_output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" softwareupdate -l 2>&1); then
         if echo "$updates_output" | grep -q "No new software available"; then
             log_status "macOS Updates" "✅ Up to date"
         else
@@ -234,7 +369,9 @@ check_macos_updates() {
             log_status "macOS Updates" "⚠️ Updates available"
         fi
     else
+        exit_code=$?
         log_status "macOS Updates" "❌ Check failed"
+        return "$exit_code"
     fi
 }
 

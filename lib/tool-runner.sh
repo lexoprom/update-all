@@ -211,7 +211,7 @@ tool_runner_generate_summary() {
             if [[ -n "${status[$component]+_}" ]]; then
                 shown=$((shown + 1))
                 case "${status[$component]}" in
-                    *Failed*) failed=$((failed + 1)) ;;
+                    *[Ff]ailed*) failed=$((failed + 1)) ;;
                     *Skipped*|*"Not installed"*|*"No commands"*) skipped=$((skipped + 1)) ;;
                     *"Dry run"*) simulated=$((simulated + 1)) ;;
                 esac
@@ -231,6 +231,11 @@ tool_runner_generate_summary() {
         printf '\n'
     fi
     printf '%bFinished %s%b\n' "$dim" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$nc"
+
+    # Surface failed components in the script's exit status so wrappers and
+    # history can detect partial failures.
+    [[ $failed -gt 0 ]] && return 1
+    return 0
 }
 
 tool_runner_execute() {

@@ -184,12 +184,15 @@ create_fake_bun() {
 #!/usr/bin/env bash
 state_file="${FAKE_BUN_STATE_FILE:-}"
 if [[ "${1:-}" == "pm" && "${2:-}" == "ls" && "${3:-}" == "-g" ]]; then
+  if [[ -n "${FAKE_BUN_LS_STDERR:-}" ]]; then
+    printf '%s\n' "$FAKE_BUN_LS_STDERR" >&2
+  fi
   if [[ -n "$state_file" && -f "$state_file" ]]; then
     cat "$state_file"
   elif [[ -n "${FAKE_BUN_LS_OUTPUT:-}" ]]; then
     printf '%s\n' "$FAKE_BUN_LS_OUTPUT"
   fi
-  exit 0
+  exit "${FAKE_BUN_LS_EXIT_CODE:-0}"
 fi
 if [[ "${1:-}" == "add" && "${2:-}" == "-g" ]]; then
   if [[ -n "${FAKE_BUN_RECORD_FILE:-}" ]]; then
@@ -274,7 +277,7 @@ clear_fake_env() {
   unset FAKE_NPM_EXECUTABLE
   unset FAKE_NPM_LIST_EXIT_CODE FAKE_MISE_RECORD_FILE FAKE_MISE_USE_EXIT_CODE
   unset FAKE_PNPM_STATE_FILE FAKE_PNPM_LIST_OUTPUT FAKE_PNPM_NEXT_LIST_OUTPUT FAKE_PNPM_RECORD_FILE FAKE_PNPM_UPDATE_EXIT_CODE FAKE_PNPM_APPROVE_EXIT_CODE FAKE_PNPM_LIST_COUNT_FILE FAKE_PNPM_LIST_FAIL_AT FAKE_PNPM_LIST_FAIL_FIRST FAKE_NPX_RECORD_FILE FAKE_NPX_EXIT_CODE FAKE_NPX_STDERR
-  unset FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
+  unset FAKE_BUN_LS_EXIT_CODE FAKE_BUN_LS_STDERR FAKE_BUN_STATE_FILE FAKE_BUN_LS_OUTPUT FAKE_BUN_NEXT_LS_OUTPUT FAKE_BUN_RECORD_FILE FAKE_BUN_ADD_EXIT_CODE
   unset FAKE_UV_OUTPUT FAKE_UV_EXIT_CODE FAKE_UV_RECORD_FILE
 }
 
@@ -650,6 +653,33 @@ test_bun_globals_use_temp_dir_at_boundary() {
   clear_fake_env
 }
 
+test_bun_globals_list_errors() {
+  local scenario case_dir
+  for scenario in empty error timeout; do
+    case_dir="$tmp/bun-list-$scenario"
+    setup_case "$case_dir"
+    create_fake_bun "$case_dir/bin"
+    export FAKE_BUN_RECORD_FILE="$case_dir/bun-record.txt"
+    export FAKE_BUN_LS_EXIT_CODE=1
+    export FAKE_BUN_LS_STDERR='error: missing lockfile, nothing to list'
+    [[ "$scenario" != error ]] || export FAKE_BUN_LS_STDERR='error: permission denied'
+    [[ "$scenario" != timeout ]] || export FAKE_BUN_LS_EXIT_CODE=124
+
+    run_global_packages "$case_dir" false bun
+    if [[ "$scenario" == empty ]]; then
+      assert_eq "0" "$TEST_EXIT_CODE" "bun empty installation exit"
+      assert_eq "✅ Success" "${TEST_RESULT[status.bun]}" "bun empty installation status"
+      assert_contains "$TEST_OUTPUT" "No global Bun packages detected."
+    else
+      assert_ne "0" "$TEST_EXIT_CODE" "bun $scenario exit"
+      assert_eq "❌ Failed" "${TEST_RESULT[status.bun]}" "bun $scenario status"
+      assert_contains "$TEST_OUTPUT" "Bun global package list failed"
+    fi
+    [[ ! -e "$FAKE_BUN_RECORD_FILE" ]] || fail "bun add ran after failed package list"
+    clear_fake_env
+  done
+}
+
 test_uv_tools_upgrade_all_at_boundary() {
   local case_dir="$tmp/uv"
   setup_case "$case_dir"
@@ -722,6 +752,7 @@ test_pnpm_globals_fail_when_recovery_fails
 test_pnpm_globals_fail_when_retry_after_recovery_fails
 test_pnpm_globals_fail_when_post_update_list_fails
 test_bun_globals_use_temp_dir_at_boundary
+test_bun_globals_list_errors
 test_uv_tools_upgrade_all_at_boundary
 test_default_run_handles_dry_run_and_missing_managers
 
