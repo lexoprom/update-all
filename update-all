@@ -351,23 +351,38 @@ update_custom_commands() {
 
 update_global_packages() {
     declare -A result=()
-    local -a managers=()
-    mapfile -t managers < <(global_packages_selected_managers)
-    global_packages_run result "$REPORT_DIR" "$DRY_RUN" log_status "${managers[@]}"
+    global_packages_run result "$REPORT_DIR" "$DRY_RUN" log_status "${GLOBAL_MANAGERS_SELECTED[@]}"
 }
 
-# UPDATE_ALL_GLOBAL_MANAGERS selects global package managers (space-separated,
+# UPDATE_ALL_GLOBAL_MANAGERS selects global package managers (whitespace-separated,
 # e.g. "npm uv"). Set but empty disables the stage, for setups where mise owns
-# all global CLIs. Unset keeps the default list.
-global_packages_selected_managers() {
+# all global CLIs. Unset keeps the default list. Resolved once, then exported in
+# normalized form so doctor.py sees the same selection.
+GLOBAL_MANAGERS_SELECTED=()
+resolve_global_managers() {
     local -a managers=()
+    local pm
     if [[ -n "${UPDATE_ALL_GLOBAL_MANAGERS+set}" ]]; then
-        read -r -a managers <<< "$UPDATE_ALL_GLOBAL_MANAGERS"
+        read -r -d '' -a managers <<< "$UPDATE_ALL_GLOBAL_MANAGERS" || true
+        for pm in "${managers[@]}"; do
+            if [[ -z "${GLOBAL_PACKAGES_LABELS[$pm]+set}" ]]; then
+                echo "UPDATE_ALL_GLOBAL_MANAGERS: unknown manager '$pm' (supported: ${GLOBAL_PACKAGES_DEFAULT_MANAGERS[*]})" >&2
+                return 1
+            fi
+        done
+        export UPDATE_ALL_GLOBAL_MANAGERS="${managers[*]}"
     else
         managers=("${GLOBAL_PACKAGES_DEFAULT_MANAGERS[@]}")
     fi
-    [[ ${#managers[@]} -gt 0 ]] && printf '%s\n' "${managers[@]}"
-    return 0
+    GLOBAL_MANAGERS_SELECTED=("${managers[@]}")
+}
+
+global_managers_selected() {
+    local pm
+    for pm in "${GLOBAL_MANAGERS_SELECTED[@]}"; do
+        [[ "$pm" == "$1" ]] && return 0
+    done
+    return 1
 }
 
 
@@ -404,13 +419,13 @@ macos_tool_components() { printf '%s\n' "macOS Updates"; }
 mise_tool_enabled() { command_exists mise; }
 mise_tool_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
 
-global_packages_tool_enabled() { [[ -n "$(global_packages_selected_managers)" ]]; }
+global_packages_tool_enabled() { [[ ${#GLOBAL_MANAGERS_SELECTED[@]} -gt 0 ]]; }
 global_packages_tool_components() {
     local pm
-    while IFS= read -r pm; do
+    for pm in "${GLOBAL_MANAGERS_SELECTED[@]}"; do
         _global_packages_label "$pm"
         printf '\n'
-    done < <(global_packages_selected_managers)
+    done
 }
 
 custom_commands_tool_enabled() {
@@ -737,6 +752,7 @@ EOF
             return 2
         fi
     fi
+    resolve_global_managers || return 2
     export UPDATE_ALL_ORIGINAL_PATH="$PATH"
     doctor_python="$(command -v python3 || true)"
     # Bootstrap without invoking mise shims: those can install or prune tools.
@@ -835,6 +851,7 @@ EOF
     fi
 
     # 1. SETUP PHASE
+    resolve_global_managers || exit 1
     acquire_lock
     REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
     if [[ ! -d "$REPORT_DIR" ]]; then
@@ -844,7 +861,7 @@ EOF
     setup_environment
 
     history_start
-    if global_packages_selected_managers | grep -qx npm; then
+    if global_managers_selected npm; then
         global_packages_snapshot "$REPORT_DIR"
     fi
     configure_tool_runner

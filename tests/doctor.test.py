@@ -271,20 +271,25 @@ class DoctorTests(unittest.TestCase):
         self.assertIn('[ERROR] npm: disappeared during last update: lost', text)
         self.assertIn('[WARN] npm: removed since last update: later', text)
 
-    def test_disabled_global_managers_are_skipped(self):
-        with patch.dict(os.environ, UPDATE_ALL_GLOBAL_MANAGERS='uv'):
-            self.assertEqual(d.enabled_managers(), ('brew', 'mise', 'uv'))
-            runner = FakeRunner()
-            rc, text = self.output(d.Doctor(runner, offline=True).run)
-        self.assertEqual(rc, 0)
-        self.assertIn('[SKIP] Global package managers disabled: npm, pnpm, bun, pipx', text)
-        self.assertNotIn('npm: not installed', text)
-        self.assertIn('uv: not installed', text)
+    def test_disabled_global_managers_are_inspected_but_not_freshness_checked(self):
+        def inventory(doc, manager):
+            doc.inventories[manager] = {'status': 'ok', 'packages': [d.package('pkg', '1')]}
+            return True
+        with patch.dict(os.environ, UPDATE_ALL_GLOBAL_MANAGERS='uv'), \
+                patch.object(d.Doctor, 'inventory', autospec=True, side_effect=inventory) as inspected, \
+                patch.object(d.Doctor, 'online', autospec=True) as online, \
+                patch.object(d.Doctor, 'check', autospec=True):
+            self.assertEqual(d.disabled_global_managers(), ('npm', 'pnpm', 'bun', 'pipx'))
+            _, text = self.output(d.Doctor(FakeRunner(), offline=True).run)
+        self.assertIn('[INFO] Global package updates disabled: npm, pnpm, bun, pipx', text)
+        self.assertEqual([c.args[1] for c in inspected.call_args_list], list(d.MANAGERS))
+        self.assertEqual([c.args[1] for c in online.call_args_list], ['brew', 'mise', 'uv'])
 
-    def test_unset_selection_keeps_all_managers(self):
-        self.assertEqual(d.enabled_managers(), d.MANAGERS)
+    def test_unset_selection_disables_nothing(self):
+        self.assertEqual(d.disabled_global_managers(), ())
 
-    def test_disabled_managers_are_ignored_in_history(self):
+    def test_disabled_managers_are_still_snapshotted_and_verified(self):
+        # mise can drop npm globals with an old node even when npm updates are disabled.
         before = {'npm': {'status': 'ok', 'packages': [d.package('lost', '1')]}}
         after = {'npm': {'status': 'ok', 'packages': []}}
         d.atomic_write(d.state_path(), self.receipt(before, after))
@@ -292,8 +297,8 @@ class DoctorTests(unittest.TestCase):
             doc = d.Doctor(FakeRunner())
             _, text = self.output(doc.receipt)
             snap = d.snapshot(FakeRunner())
-        self.assertNotIn('npm:', text)
-        self.assertEqual(sorted(snap), ['brew', 'mise'])
+        self.assertIn('[ERROR] npm: disappeared during last update: lost', text)
+        self.assertEqual(sorted(snap), sorted(d.MANAGERS))
 
     def test_bad_and_interrupted_receipts(self):
         d.atomic_write(d.state_path(), self.receipt(state='running'))

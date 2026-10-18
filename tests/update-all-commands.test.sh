@@ -262,6 +262,30 @@ test_global_managers_subset() {
   assert_not_contains "$out" "pipx packages"
 }
 
+test_global_managers_newline_separated() {
+  local case_dir="$tmp/managers-newline"
+  setup_case "$case_dir"
+
+  local out
+  out="$(UPDATE_ALL_GLOBAL_MANAGERS=$'npm\nuv' run_case "$case_dir" --dry-run --skip-commands)"
+
+  assert_contains "$out" "npm global packages"
+  assert_contains "$out" "uv tools"
+  assert_not_contains "$out" "pipx packages"
+}
+
+test_global_managers_unknown_name_fails_fast() {
+  local case_dir="$tmp/managers-unknown"
+  setup_case "$case_dir"
+
+  local out rc=0
+  out="$(UPDATE_ALL_GLOBAL_MANAGERS="npm,uv" run_case "$case_dir" --dry-run --skip-commands 2>&1)" || rc=$?
+
+  [[ "$rc" -eq 1 ]] || fail "unknown manager should exit 1, got $rc"
+  assert_contains "$out" "unknown manager 'npm,uv'"
+  assert_not_contains "$out" "Updating"
+}
+
 test_default_commands_file_pnpm_recovery_command() {
   # If the repo's default commands file repairs pnpm, it must do so without
   # depending on the local `pnpm` binary and without being diverted by a
@@ -304,6 +328,8 @@ test_step_count_excludes_disabled_custom_commands
 test_mise_runs_after_homebrew
 test_global_managers_empty_disables_stage
 test_global_managers_subset
+test_global_managers_newline_separated
+test_global_managers_unknown_name_fails_fast
 test_default_commands_file_pnpm_recovery_command
 
 echo "PASS"

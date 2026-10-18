@@ -21,13 +21,13 @@ GLOBAL_MANAGERS = ('npm', 'pnpm', 'bun', 'pipx', 'uv')
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 
 
-def enabled_managers():
-    """Managers update-all updates; UPDATE_ALL_GLOBAL_MANAGERS narrows the global ones."""
+def disabled_global_managers():
+    """Global managers update-all leaves alone. update-all validates and normalizes the variable."""
     selected = os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS')
     if selected is None:
-        return MANAGERS
+        return ()
     chosen = set(selected.split())
-    return tuple(m for m in MANAGERS if m not in GLOBAL_MANAGERS or m in chosen)
+    return tuple(m for m in GLOBAL_MANAGERS if m not in chosen)
 
 
 def clean(text):
@@ -258,12 +258,12 @@ def snapshot(runner):
         runner.prepare_path()
     except CheckError:
         environment_error = True
-    result = {name: collect(runner, name) for name in enabled_managers()}
+    # Disabled managers are snapshotted too: a mise runtime upgrade can still drop their packages.
+    result = {name: collect(runner, name) for name in MANAGERS}
     if environment_error:
         # An inventory under the wrong runtime cannot prove packages were retained.
         for name in ('mise',) + GLOBAL_MANAGERS:
-            if name in result:
-                result[name] = dict(status='error', packages=[], error='environment unavailable')
+            result[name] = dict(status='error', packages=[], error='environment unavailable')
     # Do not retain raw diagnostics: package managers may echo registry credentials.
     for inventory in result.values():
         if inventory['status'] == 'error':
@@ -338,8 +338,8 @@ class Doctor:
         self.original_path = original_path if original_path is not None else runner.env.get('PATH', '')
         self.counts = collections.Counter()
         self.inventories = {}
-        self.managers = enabled_managers()
-        self.commands = set(self.managers) | {'node', 'python', 'python3', 'softwareupdate'}
+        self.disabled = disabled_global_managers()
+        self.commands = set(MANAGERS) | {'node', 'python', 'python3', 'softwareupdate'}
         self.shim_targets = {}
 
     def emit(self, status, label, detail='', advice=''):
@@ -622,7 +622,7 @@ class Doctor:
                               'Saved execution status only; effects have not been verified.')
                 elif result in ('failed', 'warning'):
                     self.emit('WARN', 'Last update: ' + name + ': ' + result, advice='Review this update step.')
-            for manager in self.managers:
+            for manager in MANAGERS:
                 before = data['before'].get(manager, {})
                 after = data['after'].get(manager, {})
                 current = self.inventories.get(manager, {})
@@ -652,11 +652,11 @@ class Doctor:
         except CheckError as exc:
             self.emit('WARN', 'Updater environment could not be fully resolved', str(exc),
                       'Review mise configuration; runtime-dependent checks may be incomplete.')
-        disabled = [m for m in MANAGERS if m not in self.managers]
-        if disabled:
-            self.emit('SKIP', 'Global package managers disabled: ' + ', '.join(disabled),
-                      'UPDATE_ALL_GLOBAL_MANAGERS="{}"'.format(os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS', '')))
-        for manager in self.managers:
+        if self.disabled:
+            self.emit('INFO', 'Global package updates disabled: ' + ', '.join(self.disabled),
+                      'UPDATE_ALL_GLOBAL_MANAGERS="{}"; installations are still checked, '
+                      'remaining updates are not.'.format(os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS', '')))
+        for manager in MANAGERS:
             if not self.inventory(manager):
                 continue
             if manager == 'brew':
@@ -673,7 +673,9 @@ class Doctor:
                            advice='Review mise install.')
                 self.check('mise unused version candidates', ['mise', 'ls', '--prunable', '--no-header'], output_status='INFO',
                            advice='Review mise prune --dry-run; other projects may still need these versions.')
-            if not self.offline and manager in ('npm', 'pnpm', 'bun', 'pipx', 'uv') and not self.inventories[manager]['packages']:
+            if manager in self.disabled:
+                continue
+            if not self.offline and manager in GLOBAL_MANAGERS and not self.inventories[manager]['packages']:
                 self.emit('INFO', manager + ': no global packages to check for updates')
             else:
                 self.online(manager)
