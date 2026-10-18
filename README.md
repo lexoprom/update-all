@@ -13,6 +13,20 @@ update-all doctor --offline        # Local checks only
 update-all doctor --verbose        # Include commands and full diagnostics
 ```
 
+Stages run in order: Homebrew and the macOS update check in parallel, then
+mise (after Homebrew, which may upgrade mise itself), then global package
+managers, then custom commands.
+
+`UPDATE_ALL_GLOBAL_MANAGERS` selects the global package managers to update
+(space-separated, default `pipx npm pnpm bun uv`). Set it to an empty string
+when mise owns all global CLIs: the stage is skipped, so `npm install -g` never
+reinstalls or restores globals outside mise.
+
+```sh
+export UPDATE_ALL_GLOBAL_MANAGERS=""      # mise-only setup
+export UPDATE_ALL_GLOBAL_MANAGERS="npm uv"
+```
+
 ## Doctor
 
 Doctor checks manager inventories, missing installations and executables,

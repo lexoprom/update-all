@@ -351,7 +351,23 @@ update_custom_commands() {
 
 update_global_packages() {
     declare -A result=()
-    global_packages_run result "$REPORT_DIR" "$DRY_RUN" log_status
+    local -a managers=()
+    mapfile -t managers < <(global_packages_selected_managers)
+    global_packages_run result "$REPORT_DIR" "$DRY_RUN" log_status "${managers[@]}"
+}
+
+# UPDATE_ALL_GLOBAL_MANAGERS selects global package managers (space-separated,
+# e.g. "npm uv"). Set but empty disables the stage, for setups where mise owns
+# all global CLIs. Unset keeps the default list.
+global_packages_selected_managers() {
+    local -a managers=()
+    if [[ -n "${UPDATE_ALL_GLOBAL_MANAGERS+set}" ]]; then
+        read -r -a managers <<< "$UPDATE_ALL_GLOBAL_MANAGERS"
+    else
+        managers=("${GLOBAL_PACKAGES_DEFAULT_MANAGERS[@]}")
+    fi
+    [[ ${#managers[@]} -gt 0 ]] && printf '%s\n' "${managers[@]}"
+    return 0
 }
 
 
@@ -388,9 +404,13 @@ macos_tool_components() { printf '%s\n' "macOS Updates"; }
 mise_tool_enabled() { command_exists mise; }
 mise_tool_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
 
-global_packages_tool_enabled() { return 0; }
+global_packages_tool_enabled() { [[ -n "$(global_packages_selected_managers)" ]]; }
 global_packages_tool_components() {
-    printf '%s\n' "pipx packages" "npm global packages" "pnpm global packages" "bun global packages" "uv tools"
+    local pm
+    while IFS= read -r pm; do
+        _global_packages_label "$pm"
+        printf '\n'
+    done < <(global_packages_selected_managers)
 }
 
 custom_commands_tool_enabled() {
@@ -403,7 +423,9 @@ custom_commands_tool_components() { printf '%s\n' "custom commands"; }
 
 configure_tool_runner() {
     tool_runner_reset
-    tool_runner_define_phase "phase1" "parallel" "Waiting for system and runtime updates…"
+    tool_runner_define_phase "phase1" "parallel" "Waiting for system updates…"
+    # mise runs after Homebrew, which may upgrade the mise binary itself.
+    tool_runner_define_phase "runtimes" "serial"
     tool_runner_define_phase "phase2" "parallel" "Waiting for package updates…"
     tool_runner_define_phase "post" "serial"
 
@@ -411,7 +433,7 @@ configure_tool_runner() {
         homebrew_tool_enabled update_homebrew homebrew_tool_components
     tool_runner_register "macos" "phase1" "Checking macOS System Updates" \
         macos_tool_enabled check_macos_updates macos_tool_components
-    tool_runner_register "mise" "phase1" "Updating mise tools (Runtimes)" \
+    tool_runner_register "mise" "runtimes" "Updating mise tools (Runtimes)" \
         mise_tool_enabled update_mise_tools mise_tool_components
     tool_runner_register "global_packages" "phase2" "Updating global packages (Bun, npm, pnpm, Pipx, uv)" \
         global_packages_tool_enabled update_global_packages global_packages_tool_components
@@ -790,6 +812,10 @@ Options:
   --skip-commands      Disable running custom commands
   --help, -h           Show this help
 
+Environment:
+  UPDATE_ALL_GLOBAL_MANAGERS  Global package managers to update (default:
+                              "${GLOBAL_PACKAGES_DEFAULT_MANAGERS[*]}"); empty disables the stage
+
 Subcommands:
   list                 List installed items without updating (see 'list --help')
   doctor               Diagnose installations and the last update (see 'doctor --help')
@@ -818,7 +844,9 @@ EOF
     setup_environment
 
     history_start
-    global_packages_snapshot "$REPORT_DIR"
+    if global_packages_selected_managers | grep -qx npm; then
+        global_packages_snapshot "$REPORT_DIR"
+    fi
     configure_tool_runner
     tool_runner_execute "$REPORT_DIR" show_progress
     local update_rc=$?

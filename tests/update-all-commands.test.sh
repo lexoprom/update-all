@@ -223,10 +223,48 @@ EOF
   assert_not_contains "$out" "5/5  Running custom commands"
 }
 
+test_mise_runs_after_homebrew() {
+  local case_dir="$tmp/phase-order"
+  setup_case "$case_dir"
+
+  local out brew_line mise_line
+  out="$(run_case "$case_dir" --dry-run --skip-commands)"
+  brew_line="$(printf '%s\n' "$out" | grep -n 'Updating Homebrew' | head -n1 | cut -d: -f1)"
+  mise_line="$(printf '%s\n' "$out" | grep -n 'Updating mise tools' | head -n1 | cut -d: -f1)"
+  [[ -n "$brew_line" && -n "$mise_line" ]] || fail "missing Homebrew or mise stage"
+  [[ "$brew_line" -lt "$mise_line" ]] || fail "mise did not run after Homebrew"
+}
+
+test_global_managers_empty_disables_stage() {
+  local case_dir="$tmp/managers-empty"
+  setup_case "$case_dir"
+
+  local out
+  out="$(UPDATE_ALL_GLOBAL_MANAGERS="" run_case "$case_dir" --dry-run --skip-commands)"
+
+  assert_contains "$out" "3/3  Updating mise tools (Runtimes)"
+  assert_not_contains "$out" "Updating global packages"
+  assert_not_contains "$out" "npm global packages"
+}
+
+test_global_managers_subset() {
+  local case_dir="$tmp/managers-subset"
+  setup_case "$case_dir"
+
+  local out
+  out="$(UPDATE_ALL_GLOBAL_MANAGERS="uv" run_case "$case_dir" --dry-run --skip-commands)"
+
+  assert_contains "$out" "4/4  Updating global packages"
+  assert_contains "$out" "uv tools"
+  assert_not_contains "$out" "npm global packages"
+  assert_not_contains "$out" "pipx packages"
+}
+
 test_default_commands_file_pnpm_recovery_command() {
-  # The repo's default commands file must repair pnpm without depending on the
-  # local `pnpm` binary and without being diverted by a project packageManager
-  # pin. The active recovery line must:
+  # If the repo's default commands file repairs pnpm, it must do so without
+  # depending on the local `pnpm` binary and without being diverted by a
+  # project packageManager pin. No active line is fine (e.g. pnpm managed by
+  # mise). An active recovery line must:
   #   - not start with bare `pnpm self-update` (can't recover a broken launcher);
   #   - contain `npx --yes pnpm@latest-11 self-update` (npm/npx-backed); and
   #   - contain `pnpm_config_pm_on_fail=ignore` (skip project pnpm pins).
@@ -243,7 +281,7 @@ test_default_commands_file_pnpm_recovery_command() {
     fi
   done < "$file"
 
-  [[ -n "$recovery" ]] || fail "no active pnpm self-update recovery command found"
+  [[ -n "$recovery" ]] || return 0
   if [[ "$recovery" == "pnpm self-update"* ]]; then
     fail "active pnpm self-update command is still bare: $recovery"
   fi
@@ -261,6 +299,9 @@ test_commands_file_override
 test_skip_commands
 test_step_count_includes_enabled_custom_commands
 test_step_count_excludes_disabled_custom_commands
+test_mise_runs_after_homebrew
+test_global_managers_empty_disables_stage
+test_global_managers_subset
 test_default_commands_file_pnpm_recovery_command
 
 echo "PASS"
