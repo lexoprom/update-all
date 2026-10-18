@@ -11,6 +11,9 @@ import time
 import signal
 import unittest
 
+# Tests expect the default manager list regardless of the caller's setup.
+os.environ.pop('UPDATE_ALL_GLOBAL_MANAGERS', None)
+
 ROOT = Path(__file__).resolve().parents[1]
 
 FAKE = r'''import json, os, pathlib, sys, time

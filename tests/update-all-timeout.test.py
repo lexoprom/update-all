@@ -8,6 +8,9 @@ import tempfile
 import time
 import unittest
 
+# Tests expect the default manager list regardless of the caller's setup.
+os.environ.pop('UPDATE_ALL_GLOBAL_MANAGERS', None)
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'update-all'
 SOURCE = SCRIPT.read_text()

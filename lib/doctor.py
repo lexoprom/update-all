@@ -17,7 +17,17 @@ import sys
 import tempfile
 
 MANAGERS = ('brew', 'mise', 'npm', 'pnpm', 'bun', 'pipx', 'uv')
+GLOBAL_MANAGERS = ('npm', 'pnpm', 'bun', 'pipx', 'uv')
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+
+
+def enabled_managers():
+    """Managers update-all updates; UPDATE_ALL_GLOBAL_MANAGERS narrows the global ones."""
+    selected = os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS')
+    if selected is None:
+        return MANAGERS
+    chosen = set(selected.split())
+    return tuple(m for m in MANAGERS if m not in GLOBAL_MANAGERS or m in chosen)
 
 
 def clean(text):
@@ -248,11 +258,12 @@ def snapshot(runner):
         runner.prepare_path()
     except CheckError:
         environment_error = True
-    result = {name: collect(runner, name) for name in MANAGERS}
+    result = {name: collect(runner, name) for name in enabled_managers()}
     if environment_error:
         # An inventory under the wrong runtime cannot prove packages were retained.
-        for name in ('mise', 'npm', 'pnpm', 'bun', 'pipx', 'uv'):
-            result[name] = dict(status='error', packages=[], error='environment unavailable')
+        for name in ('mise',) + GLOBAL_MANAGERS:
+            if name in result:
+                result[name] = dict(status='error', packages=[], error='environment unavailable')
     # Do not retain raw diagnostics: package managers may echo registry credentials.
     for inventory in result.values():
         if inventory['status'] == 'error':
@@ -327,7 +338,8 @@ class Doctor:
         self.original_path = original_path if original_path is not None else runner.env.get('PATH', '')
         self.counts = collections.Counter()
         self.inventories = {}
-        self.commands = set(MANAGERS) | {'node', 'python', 'python3', 'softwareupdate'}
+        self.managers = enabled_managers()
+        self.commands = set(self.managers) | {'node', 'python', 'python3', 'softwareupdate'}
         self.shim_targets = {}
 
     def emit(self, status, label, detail='', advice=''):
@@ -610,7 +622,7 @@ class Doctor:
                               'Saved execution status only; effects have not been verified.')
                 elif result in ('failed', 'warning'):
                     self.emit('WARN', 'Last update: ' + name + ': ' + result, advice='Review this update step.')
-            for manager in MANAGERS:
+            for manager in self.managers:
                 before = data['before'].get(manager, {})
                 after = data['after'].get(manager, {})
                 current = self.inventories.get(manager, {})
@@ -640,7 +652,11 @@ class Doctor:
         except CheckError as exc:
             self.emit('WARN', 'Updater environment could not be fully resolved', str(exc),
                       'Review mise configuration; runtime-dependent checks may be incomplete.')
-        for manager in MANAGERS:
+        disabled = [m for m in MANAGERS if m not in self.managers]
+        if disabled:
+            self.emit('SKIP', 'Global package managers disabled: ' + ', '.join(disabled),
+                      'UPDATE_ALL_GLOBAL_MANAGERS="{}"'.format(os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS', '')))
+        for manager in self.managers:
             if not self.inventory(manager):
                 continue
             if manager == 'brew':

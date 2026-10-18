@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Tests expect the default manager list regardless of the caller's setup.
+unset UPDATE_ALL_GLOBAL_MANAGERS
 
 strip_ansi() {
   perl -pe 's/\e\[[0-9;]*[mK]//g'

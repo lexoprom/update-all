@@ -13,6 +13,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+# Tests expect the default manager list regardless of the caller's setup.
+os.environ.pop('UPDATE_ALL_GLOBAL_MANAGERS', None)
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('doctor', ROOT / 'lib/doctor.py')
 d = importlib.util.module_from_spec(spec)
@@ -267,6 +270,30 @@ class DoctorTests(unittest.TestCase):
         _, text = self.output(doc.receipt)
         self.assertIn('[ERROR] npm: disappeared during last update: lost', text)
         self.assertIn('[WARN] npm: removed since last update: later', text)
+
+    def test_disabled_global_managers_are_skipped(self):
+        with patch.dict(os.environ, UPDATE_ALL_GLOBAL_MANAGERS='uv'):
+            self.assertEqual(d.enabled_managers(), ('brew', 'mise', 'uv'))
+            runner = FakeRunner()
+            rc, text = self.output(d.Doctor(runner, offline=True).run)
+        self.assertEqual(rc, 0)
+        self.assertIn('[SKIP] Global package managers disabled: npm, pnpm, bun, pipx', text)
+        self.assertNotIn('npm: not installed', text)
+        self.assertIn('uv: not installed', text)
+
+    def test_unset_selection_keeps_all_managers(self):
+        self.assertEqual(d.enabled_managers(), d.MANAGERS)
+
+    def test_disabled_managers_are_ignored_in_history(self):
+        before = {'npm': {'status': 'ok', 'packages': [d.package('lost', '1')]}}
+        after = {'npm': {'status': 'ok', 'packages': []}}
+        d.atomic_write(d.state_path(), self.receipt(before, after))
+        with patch.dict(os.environ, UPDATE_ALL_GLOBAL_MANAGERS=''):
+            doc = d.Doctor(FakeRunner())
+            _, text = self.output(doc.receipt)
+            snap = d.snapshot(FakeRunner())
+        self.assertNotIn('npm:', text)
+        self.assertEqual(sorted(snap), ['brew', 'mise'])
 
     def test_bad_and_interrupted_receipts(self):
         d.atomic_write(d.state_path(), self.receipt(state='running'))

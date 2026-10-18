@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Tests expect the default manager list regardless of the caller's setup.
+unset UPDATE_ALL_GLOBAL_MANAGERS
 
 # Tests for retry behavior of mise tool upgrades (transient aube/npm stream
 # errors) and for exit-code propagation when updates fail.
