@@ -27,6 +27,19 @@ export UPDATE_ALL_GLOBAL_MANAGERS=""      # mise-only setup
 export UPDATE_ALL_GLOBAL_MANAGERS="npm uv"
 ```
 
+`UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS` (default `2`) skips the macOS update
+check when a previous check succeeded within that many days; `0` checks on every
+run. The last successful check is stored in
+`${XDG_STATE_HOME:-$HOME/.local/state}/update-all/macos-check`. Failed checks and
+`--dry-run` never update it, and unrecognized `softwareupdate` output is not
+cached. A cached result is dropped once the macOS build changes (for example
+after installing an update). If the last check found pending updates, skipped
+runs still report them as a warning.
+
+```sh
+UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS=0 update-all   # force a check now
+```
+
 ## Doctor
 
 Doctor checks manager inventories, missing installations and executables,

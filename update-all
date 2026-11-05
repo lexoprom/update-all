@@ -60,6 +60,9 @@ HISTORY_PYTHON=""
 # `softwareupdate -l` otherwise hangs the whole run forever (and keeps the
 # lock, blocking future runs). Override with UPDATE_ALL_TOOL_TIMEOUT.
 TOOL_TIMEOUT_SECONDS="${UPDATE_ALL_TOOL_TIMEOUT:-3600}"
+# Skip the (slow) `softwareupdate -l` check if one succeeded within this many
+# days; 0 checks on every run. Override with UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS.
+MACOS_CHECK_INTERVAL_DAYS="${UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS:-2}"
 
 resolve_script_path() {
     local path="$1"
@@ -386,18 +389,109 @@ global_managers_selected() {
 }
 
 
+validate_macos_check_interval() {
+    # At most 5 digits keeps days*86400 far from 64-bit overflow.
+    if [[ ! "$MACOS_CHECK_INTERVAL_DAYS" =~ ^[0-9]{1,5}$ ]]; then
+        echo "UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS: expected a whole number of days from 0 to 99999, got '$MACOS_CHECK_INTERVAL_DAYS'" >&2
+        return 1
+    fi
+    # Force base 10 so values like "08" are not parsed as octal.
+    MACOS_CHECK_INTERVAL_DAYS=$((10#$MACOS_CHECK_INTERVAL_DAYS))
+}
+
+# Format an epoch with the shell builtin; external `date -r` differs between
+# BSD and GNU coreutils.
+macos_check_format_epoch() {
+    local label
+    printf -v label '%(%Y-%m-%d %H:%M)T' "$1" 2>/dev/null || label="$1"
+    printf '%s\n' "$label"
+}
+
+macos_check_state_file() {
+    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/update-all/macos-check"
+}
+
+# Current macOS build (e.g. 25A354), or "unknown". Stored with each check so
+# installing an update invalidates the cached result.
+macos_check_current_build() {
+    local build
+    build="$(sw_vers -buildVersion 2>/dev/null)" || build=""
+    [[ "$build" =~ ^[A-Za-z0-9._-]+$ ]] || build="unknown"
+    printf '%s\n' "$build"
+}
+
+# Prints "<epoch> <result>" for a well-formed state file recorded on the
+# current macOS build; fails otherwise.
+macos_check_read_state() {
+    local file epoch result build extra
+    file="$(macos_check_state_file)"
+    [[ -f "$file" ]] || return 1
+    # Redirect stderr first so an unreadable file stays quiet.
+    IFS=$'\t' read -r epoch result build extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
+    # No leading zero (Bash would parse it as octal) and at most 12 digits
+    # (no arithmetic overflow); anything else is treated as stale.
+    [[ "$epoch" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    [[ "$result" == up-to-date || "$result" == updates-available ]] || return 1
+    # A different (or missing) build means macOS changed since the check.
+    [[ -n "${build:-}" && "$build" == "$(macos_check_current_build)" ]] || return 1
+    printf '%s %s\n' "$epoch" "$result"
+}
+
+macos_check_write_state() {
+    local file dir tmp_file
+    file="$(macos_check_state_file)"
+    dir="$(dirname "$file")"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    # Drop temp files left by runs killed between mktemp and mv.
+    rm -f "$dir"/.macos-check.?????? 2>/dev/null || true
+    tmp_file="$(mktemp "$dir/.macos-check.XXXXXX" 2>/dev/null)" || return 0
+    if printf '%s\t%s\t%s\n' "$(date +%s)" "$1" "$(macos_check_current_build)" > "$tmp_file" 2>/dev/null; then
+        mv -f "$tmp_file" "$file" 2>/dev/null || rm -f "$tmp_file"
+    else
+        rm -f "$tmp_file"
+    fi
+}
+
 check_macos_updates() {
     if [[ "$DRY_RUN" = true ]]; then
         log_status "macOS Updates" "🔍 Dry run"
         return
     fi
+
+    if (( MACOS_CHECK_INTERVAL_DAYS > 0 )); then
+        local state last_epoch last_result now age last_label
+        if state="$(macos_check_read_state)"; then
+            read -r last_epoch last_result <<< "$state"
+            now="$(date +%s)"
+            age=$(( now - last_epoch ))
+            # A future timestamp (clock skew) counts as stale.
+            if (( age >= 0 && age < MACOS_CHECK_INTERVAL_DAYS * 86400 )); then
+                last_label="$(macos_check_format_epoch "$last_epoch")"
+                # Pending updates stay a warning in the summary and receipt.
+                if [[ "$last_result" == updates-available ]]; then
+                    log_status "macOS Updates" "⚠️ Updates available (cached, checked $last_label; UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS=0 to recheck)"
+                else
+                    log_status "macOS Updates" "⏭️ Skipped (up to date as of $last_label)"
+                fi
+                return 0
+            fi
+        fi
+    fi
+
     local updates_output exit_code
     if updates_output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" softwareupdate -l 2>&1); then
-        if echo "$updates_output" | grep -q "No new software available"; then
+        # Same interpretation as doctor.py. Only clear results are cached, so
+        # odd output (offline, catalog errors) is rechecked on the next run.
+        if grep -qF "No new software available" <<< "$updates_output"; then
             log_status "macOS Updates" "✅ Up to date"
-        else
+            macos_check_write_state up-to-date
+        elif grep -qF '* ' <<< "$updates_output"; then
             echo -e "${YELLOW}Available macOS updates:${NC}\n$updates_output"
             log_status "macOS Updates" "⚠️ Updates available"
+            macos_check_write_state updates-available
+        else
+            echo -e "${YELLOW}Unrecognized softwareupdate output:${NC}\n$updates_output"
+            log_status "macOS Updates" "⚠️ Unrecognized output"
         fi
     else
         exit_code=$?
@@ -831,6 +925,9 @@ Options:
 Environment:
   UPDATE_ALL_GLOBAL_MANAGERS  Global package managers to update (default:
                               "${GLOBAL_PACKAGES_DEFAULT_MANAGERS[*]}"); empty disables the stage
+  UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS
+                              Skip the macOS update check if one succeeded within
+                              this many days (0-99999, default: 2); 0 checks every run
 
 Subcommands:
   list                 List installed items without updating (see 'list --help')
@@ -852,6 +949,7 @@ EOF
 
     # 1. SETUP PHASE
     resolve_global_managers || exit 1
+    validate_macos_check_interval || exit 1
     acquire_lock
     REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
     if [[ ! -d "$REPORT_DIR" ]]; then
