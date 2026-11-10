@@ -208,7 +208,7 @@ EOF
   local out
   out="$(run_case "$case_dir" --dry-run)"
 
-  assert_contains "$out" "5/5  Running custom commands"
+  assert_contains "$out" "6/6  Running custom commands"
 }
 
 test_step_count_excludes_disabled_custom_commands() {
@@ -221,8 +221,8 @@ EOF
   local out
   out="$(run_case "$case_dir" --dry-run --skip-commands)"
 
-  assert_contains "$out" "4/4  Updating global packages (Bun, npm, pnpm, Pipx, uv)"
-  assert_not_contains "$out" "5/5  Running custom commands"
+  assert_contains "$out" "5/5  Updating global packages (Bun, npm, pnpm, Pipx, uv)"
+  assert_not_contains "$out" "6/6  Running custom commands"
 }
 
 test_mise_runs_after_homebrew() {
@@ -235,6 +235,7 @@ test_mise_runs_after_homebrew() {
   mise_line="$(printf '%s\n' "$out" | grep -n 'Updating mise tools' | head -n1 | cut -d: -f1)"
   [[ -n "$brew_line" && -n "$mise_line" ]] || fail "missing Homebrew or mise stage"
   [[ "$brew_line" -lt "$mise_line" ]] || fail "mise did not run after Homebrew"
+  assert_contains "$out" "Would execute: brew upgrade --cask --greedy-auto-updates"
 }
 
 test_global_managers_empty_disables_stage() {
@@ -244,7 +245,7 @@ test_global_managers_empty_disables_stage() {
   local out
   out="$(UPDATE_ALL_GLOBAL_MANAGERS="" run_case "$case_dir" --dry-run --skip-commands)"
 
-  assert_contains "$out" "3/3  Updating mise tools (Runtimes)"
+  assert_contains "$out" "4/4  Updating mise tools (Runtimes)"
   assert_not_contains "$out" "Updating global packages"
   assert_not_contains "$out" "npm global packages"
 }
@@ -256,7 +257,7 @@ test_global_managers_subset() {
   local out
   out="$(UPDATE_ALL_GLOBAL_MANAGERS="uv" run_case "$case_dir" --dry-run --skip-commands)"
 
-  assert_contains "$out" "4/4  Updating global packages"
+  assert_contains "$out" "5/5  Updating global packages"
   assert_contains "$out" "uv tools"
   assert_not_contains "$out" "npm global packages"
   assert_not_contains "$out" "pipx packages"

@@ -14,8 +14,10 @@ update-all doctor --verbose        # Include commands and full diagnostics
 ```
 
 Stages run in order: Homebrew and the macOS update check in parallel, then
-mise (after Homebrew, which may upgrade mise itself), then global package
-managers, then custom commands.
+Homebrew casks marked `auto_updates` (`brew upgrade --cask --greedy-auto-updates`,
+serial because pkg installers may prompt for a sudo password), then mise (after
+Homebrew, which may upgrade mise itself), then global package managers, then
+custom commands.
 
 `UPDATE_ALL_GLOBAL_MANAGERS` selects the global package managers to update
 (space-separated, default `pipx npm pnpm bun uv`). Set it to an empty string

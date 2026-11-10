@@ -330,6 +330,19 @@ update_homebrew() {
     safe_execute "Homebrew cleanup" brew cleanup
 }
 
+# Plain `brew upgrade` skips casks marked auto_updates, assuming the app keeps
+# itself current. Many don't (gcloud-cli never does; Zoom/Drive/Karabiner lag
+# major versions), so upgrade them explicitly. `--greedy-auto-updates` rather
+# than `--greedy`: the latter also reinstalls every `version :latest` cask on
+# each run. Runs serially, outside the parallel phase, because pkg-based casks
+# prompt for a sudo password on the terminal.
+update_homebrew_auto_update_casks() {
+    if [[ "$DRY_RUN" != true ]]; then
+        printf '  %b·  pkg-based casks may prompt for your sudo password%b\n' "$DIM" "$NC"
+    fi
+    safe_execute "Homebrew auto-update casks" brew upgrade --cask --greedy-auto-updates
+}
+
 update_mise_tools() {
     local rc=0
     # mise upgrade failures are usually transient registry/CDN stream errors
@@ -506,6 +519,7 @@ homebrew_tool_enabled() { command_exists brew; }
 homebrew_tool_components() {
     printf '%s\n' "Homebrew update" "Homebrew upgrade" "Homebrew cleanup"
 }
+homebrew_casks_tool_components() { printf '%s\n' "Homebrew auto-update casks"; }
 
 macos_tool_enabled() { command_exists softwareupdate; }
 macos_tool_components() { printf '%s\n' "macOS Updates"; }
@@ -533,6 +547,8 @@ custom_commands_tool_components() { printf '%s\n' "custom commands"; }
 configure_tool_runner() {
     tool_runner_reset
     tool_runner_define_phase "phase1" "parallel" "Waiting for system updates…"
+    # Serial: pkg cask installers may prompt for a sudo password.
+    tool_runner_define_phase "casks" "serial"
     # mise runs after Homebrew, which may upgrade the mise binary itself.
     tool_runner_define_phase "runtimes" "serial"
     tool_runner_define_phase "phase2" "parallel" "Waiting for package updates…"
@@ -540,6 +556,8 @@ configure_tool_runner() {
 
     tool_runner_register "homebrew" "phase1" "Updating Homebrew" \
         homebrew_tool_enabled update_homebrew homebrew_tool_components
+    tool_runner_register "homebrew_casks" "casks" "Updating self-updating Homebrew casks" \
+        homebrew_tool_enabled update_homebrew_auto_update_casks homebrew_casks_tool_components
     tool_runner_register "macos" "phase1" "Checking macOS System Updates" \
         macos_tool_enabled check_macos_updates macos_tool_components
     tool_runner_register "mise" "runtimes" "Updating mise tools (Runtimes)" \

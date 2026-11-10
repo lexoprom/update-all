@@ -30,7 +30,7 @@ if name == 'mise':
 elif name == 'brew':
     if args == ['update'] and os.environ.get('SLOW_UPDATE'): time.sleep(2)
     if args == ['--prefix']: print(os.environ['HOME'] + '/brew')
-    elif args == ['outdated', '--json=v2']: print('{"formulae": [], "casks": []}')
+    elif args == ['outdated', '--json=v2', '--greedy-auto-updates']: print('{"formulae": [], "casks": []}')
 elif name in ('npm', 'pnpm'):
     if args[:1] == ['list'] and '--json' in args: print('{}' if name == 'npm' else '[]')
     elif args[:1] == ['root']: print(os.environ['HOME'] + '/globals')

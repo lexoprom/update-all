@@ -120,7 +120,7 @@ class DoctorTests(unittest.TestCase):
 
     def test_pins_and_prunable_versions_are_not_failures(self):
         r = FakeRunner({('brew', 'update'): '', ('brew', 'list', '--pinned'): 'node',
-                        ('brew', 'outdated', '--json=v2'): json.dumps({
+                        ('brew', 'outdated', '--json=v2', '--greedy-auto-updates'): json.dumps({
                             'formulae': [{'name': 'node', 'installed_versions': ['20'], 'current_version': '22'}], 'casks': []}),
                         ('mise', 'ls', '--prunable', '--no-header'): 'node 18\n'}, ['brew', 'mise'])
         doc = d.Doctor(r)

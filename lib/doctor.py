@@ -515,7 +515,7 @@ class Doctor:
                 if not self.check('Homebrew metadata refresh', ['brew', 'update'], advice='Retry brew update.'):
                     self.emit('WARN', 'Homebrew freshness is unknown; metadata refresh failed')
                     return
-                data = self.r.data('brew', 'outdated', '--json=v2')
+                data = self.r.data('brew', 'outdated', '--json=v2', '--greedy-auto-updates')
                 entries = data['formulae'] + data['casks']
                 pinned = set(self.r.output('brew', 'list', '--pinned').splitlines())
                 for entry in entries:
@@ -524,7 +524,7 @@ class Doctor:
                     self.emit('INFO' if pin else 'WARN', 'brew: ' + name + (' is pinned' if pin else ' has an update'),
                               '{} -> {}'.format(entry.get('installed_versions', entry.get('installed', '?')),
                                                 entry.get('current_version', '?')),
-                              '' if pin else 'Run update-all, or review brew upgrade ' + shlex.quote(name))
+                              '' if pin else 'Run update-all, or review brew upgrade --greedy-auto-updates ' + shlex.quote(name))
                 if not entries:
                     self.emit('OK', 'brew: no remaining updates')
             elif manager == 'mise':
