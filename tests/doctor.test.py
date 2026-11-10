@@ -310,6 +310,18 @@ class DoctorTests(unittest.TestCase):
         self.assertIn('history is unreadable', text)
         self.assertFalse((self.root / 'should-never-run').exists())
 
+    def test_pending_macos_updates_in_receipt_are_info(self):
+        data = self.receipt()
+        data['results'] = {'macOS Updates': 'warning', 'Homebrew upgrade': 'warning',
+                           'stage:macos': 'failed'}
+        d.atomic_write(d.state_path(), data)
+        _, text = self.output(d.Doctor(FakeRunner()).receipt)
+        self.assertIn('[INFO] Last update: macOS Updates: updates were pending', text)
+        self.assertNotIn('[WARN] Last update: macOS Updates', text)
+        # Other warnings and a failed macOS check still need review.
+        self.assertIn('[WARN] Last update: Homebrew upgrade: warning', text)
+        self.assertIn('[WARN] Last update: stage:macos: failed', text)
+
     def test_receipts_are_atomic_private_and_redacted(self):
         report = self.root / 'report'
         report.mkdir()

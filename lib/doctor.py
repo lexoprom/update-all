@@ -675,6 +675,11 @@ class Doctor:
                 if name.startswith('command ') or name == 'custom commands':
                     self.emit('WARN' if result == 'failed' else 'INFO', 'Last update: ' + name + ': ' + result,
                               'Saved execution status only; effects have not been verified.')
+                elif name == 'macOS Updates' and result == 'warning':
+                    # Pending macOS updates: update-all only lists them, and the live
+                    # check above already reports them as INFO.
+                    self.emit('INFO', 'Last update: ' + name + ': updates were pending',
+                              advice='update-all does not install macOS updates.')
                 elif result in ('failed', 'warning'):
                     self.emit('WARN', 'Last update: ' + name + ': ' + result, advice='Review this update step.')
             for manager in MANAGERS:
