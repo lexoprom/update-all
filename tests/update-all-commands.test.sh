@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Tests expect the default manager list regardless of the caller's setup.
-unset UPDATE_ALL_GLOBAL_MANAGERS UPDATE_ALL_COMMANDS_INTERVAL_DAYS
+unset UPDATE_ALL_GLOBAL_MANAGERS UPDATE_ALL_COMMANDS_INTERVAL_DAYS UPDATE_ALL_CASKS_INTERVAL_DAYS UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS
 
 strip_ansi() {
   perl -pe 's/\e\[[0-9;]*[mK]//g'
@@ -341,7 +341,7 @@ test_commands_interval_skips_recent_run() {
   local out
   out="$(run_case "$case_dir")"
   [[ "$(marker_count "$case_dir")" == 1 ]] || fail "commands re-ran within the interval"
-  assert_contains "$out" "Skipped (last run"
+  assert_contains "$out" "--force-commands to run now)"
   assert_not_contains "$out" "Running custom commands"
 }
 
@@ -355,6 +355,8 @@ test_commands_interval_force_and_zero() {
   [[ "$(marker_count "$case_dir")" == 2 ]] || fail "--force-commands did not run commands"
   UPDATE_ALL_COMMANDS_INTERVAL_DAYS=0 run_case "$case_dir" >/dev/null
   [[ "$(marker_count "$case_dir")" == 3 ]] || fail "interval 0 did not run commands"
+  run_case "$case_dir" --force-intervals >/dev/null
+  [[ "$(marker_count "$case_dir")" == 4 ]] || fail "--force-intervals did not run commands"
 }
 
 test_commands_interval_reruns_after_edit_or_failure() {

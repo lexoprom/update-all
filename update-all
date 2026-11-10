@@ -69,6 +69,15 @@ MACOS_CHECK_INTERVAL_DAYS="${UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS:-2}"
 COMMANDS_INTERVAL_DAYS="${UPDATE_ALL_COMMANDS_INTERVAL_DAYS:-7}"
 FORCE_COMMANDS=false
 COMMANDS_SKIP_REASON=""
+# Upgrade Homebrew casks marked auto_updates at most once per this many days;
+# 0 upgrades them on every run. Override with UPDATE_ALL_CASKS_INTERVAL_DAYS.
+CASKS_INTERVAL_DAYS="${UPDATE_ALL_CASKS_INTERVAL_DAYS:-7}"
+# Run `brew cleanup` at most once per this many days; 0 runs it on every run.
+# Override with UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS.
+BREW_CLEANUP_INTERVAL_DAYS="${UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS:-7}"
+# --force-intervals ignores every interval above for one run.
+FORCE_INTERVALS=false
+INTERVAL_SKIP_REASON=""
 
 resolve_script_path() {
     local path="$1"
@@ -331,9 +340,19 @@ acquire_lock() {
 # --- UPDATE FUNCTIONS ---
 
 update_homebrew() {
-    safe_execute "Homebrew update" brew update
-    safe_execute "Homebrew upgrade" brew upgrade
-    safe_execute "Homebrew cleanup" brew cleanup
+    local rc=0
+    safe_execute "Homebrew update" brew update || rc=$?
+    safe_execute "Homebrew upgrade" brew upgrade || rc=$?
+    # `brew upgrade` already removes the versions it replaces, so the full
+    # cleanup (slow even when there is nothing to do) runs on an interval.
+    if interval_is_fresh brew-cleanup "$BREW_CLEANUP_INTERVAL_DAYS"; then
+        log_status "Homebrew cleanup" "$INTERVAL_SKIP_REASON"
+    elif safe_execute "Homebrew cleanup" brew cleanup; then
+        [[ "$DRY_RUN" == true ]] || interval_write_state brew-cleanup "$(date +%s)"
+    else
+        rc=$?
+    fi
+    return "$rc"
 }
 
 # Plain `brew upgrade` skips casks marked auto_updates, assuming the app keeps
@@ -341,12 +360,19 @@ update_homebrew() {
 # major versions), so upgrade them explicitly. `--greedy-auto-updates` rather
 # than `--greedy`: the latter also reinstalls every `version :latest` cask on
 # each run. Runs serially, outside the parallel phase, because pkg-based casks
-# prompt for a sudo password on the terminal.
+# prompt for a sudo password on the terminal. Most of these apps do update
+# themselves, and upgrading reinstalls running apps, so this runs on an
+# interval (UPDATE_ALL_CASKS_INTERVAL_DAYS).
 update_homebrew_auto_update_casks() {
+    if interval_is_fresh brew-casks "$CASKS_INTERVAL_DAYS"; then
+        log_status "Homebrew auto-update casks" "$INTERVAL_SKIP_REASON"
+        return 0
+    fi
     if [[ "$DRY_RUN" != true ]]; then
         printf '  %b·  pkg-based casks may prompt for your sudo password%b\n' "$DIM" "$NC"
     fi
-    safe_execute "Homebrew auto-update casks" brew upgrade --cask --greedy-auto-updates
+    safe_execute "Homebrew auto-update casks" brew upgrade --cask --greedy-auto-updates || return $?
+    [[ "$DRY_RUN" == true ]] || interval_write_state brew-casks "$(date +%s)"
 }
 
 update_mise_tools() {
@@ -377,10 +403,6 @@ update_custom_commands() {
     return "$rc"
 }
 
-commands_interval_state_file() {
-    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/update-all/commands-last-run"
-}
-
 # Checksum of the commands file, so edits invalidate the recorded run.
 commands_file_checksum() {
     local sum
@@ -391,17 +413,7 @@ commands_file_checksum() {
 }
 
 commands_interval_write_state() {
-    local file dir tmp_file
-    file="$(commands_interval_state_file)"
-    dir="$(dirname "$file")"
-    mkdir -p "$dir" 2>/dev/null || return 0
-    rm -f "$dir"/.commands-last-run.?????? 2>/dev/null || true
-    tmp_file="$(mktemp "$dir/.commands-last-run.XXXXXX" 2>/dev/null)" || return 0
-    if printf '%s\t%s\n' "$(date +%s)" "$(commands_file_checksum)" > "$tmp_file" 2>/dev/null; then
-        mv -f "$tmp_file" "$file" 2>/dev/null || rm -f "$tmp_file"
-    else
-        rm -f "$tmp_file"
-    fi
+    interval_write_state commands-last-run "$(date +%s)" "$(commands_file_checksum)"
 }
 
 # Succeeds (and sets COMMANDS_SKIP_REASON) when the commands ran recently
@@ -409,25 +421,8 @@ commands_interval_write_state() {
 commands_interval_is_fresh() {
     COMMANDS_SKIP_REASON=""
     [[ "$FORCE_COMMANDS" != true ]] || return 1
-    (( COMMANDS_INTERVAL_DAYS > 0 )) || return 1
-    local file epoch sum extra now age
-    file="$(commands_interval_state_file)"
-    [[ -f "$file" ]] || return 1
-    IFS=$'\t' read -r epoch sum extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
-    [[ "$epoch" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
-    [[ -n "${sum:-}" && "$sum" == "$(commands_file_checksum)" ]] || return 1
-    now="$(date +%s)"
-    age=$(( now - epoch ))
-    (( age >= 0 && age < COMMANDS_INTERVAL_DAYS * 86400 )) || return 1
-    COMMANDS_SKIP_REASON="⏭️ Skipped (last run $(macos_check_format_epoch "$epoch"), next after $(macos_check_format_epoch $(( epoch + COMMANDS_INTERVAL_DAYS * 86400 ))); --force-commands to run now)"
-}
-
-validate_commands_interval() {
-    if [[ ! "$COMMANDS_INTERVAL_DAYS" =~ ^[0-9]{1,5}$ ]]; then
-        echo "UPDATE_ALL_COMMANDS_INTERVAL_DAYS: expected a whole number of days from 0 to 99999, got '$COMMANDS_INTERVAL_DAYS'" >&2
-        return 1
-    fi
-    COMMANDS_INTERVAL_DAYS=$((10#$COMMANDS_INTERVAL_DAYS))
+    interval_is_fresh commands-last-run "$COMMANDS_INTERVAL_DAYS" "$(commands_file_checksum)" || return 1
+    COMMANDS_SKIP_REASON="${INTERVAL_SKIP_REASON%)}; --force-commands to run now)"
 }
 
 update_global_packages() {
@@ -467,14 +462,77 @@ global_managers_selected() {
 }
 
 
-validate_macos_check_interval() {
+# --- Run intervals ---
+# Steps that need not run every time record their last success in a one-line,
+# tab-separated state file: "<epoch>[\t<fingerprint>...]".
+
+# validate_interval_days <variable name> <env var name>
+validate_interval_days() {
+    local -n interval_days_ref="$1"
     # At most 5 digits keeps days*86400 far from 64-bit overflow.
-    if [[ ! "$MACOS_CHECK_INTERVAL_DAYS" =~ ^[0-9]{1,5}$ ]]; then
-        echo "UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS: expected a whole number of days from 0 to 99999, got '$MACOS_CHECK_INTERVAL_DAYS'" >&2
+    if [[ ! "$interval_days_ref" =~ ^[0-9]{1,5}$ ]]; then
+        echo "$2: expected a whole number of days from 0 to 99999, got '$interval_days_ref'" >&2
         return 1
     fi
     # Force base 10 so values like "08" are not parsed as octal.
-    MACOS_CHECK_INTERVAL_DAYS=$((10#$MACOS_CHECK_INTERVAL_DAYS))
+    interval_days_ref=$((10#$interval_days_ref))
+}
+
+validate_intervals() {
+    validate_interval_days MACOS_CHECK_INTERVAL_DAYS UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS &&
+        validate_interval_days COMMANDS_INTERVAL_DAYS UPDATE_ALL_COMMANDS_INTERVAL_DAYS &&
+        validate_interval_days CASKS_INTERVAL_DAYS UPDATE_ALL_CASKS_INTERVAL_DAYS &&
+        validate_interval_days BREW_CLEANUP_INTERVAL_DAYS UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS
+}
+
+interval_state_file() {
+    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/update-all/$1"
+}
+
+# interval_write_state <name> <field>...: atomic, best effort.
+interval_write_state() {
+    local file dir base tmp_file
+    file="$(interval_state_file "$1")"
+    shift
+    dir="$(dirname "$file")"
+    base="$(basename "$file")"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    # Drop temp files left by runs killed between mktemp and mv.
+    rm -f "$dir/.$base".?????? 2>/dev/null || true
+    tmp_file="$(mktemp "$dir/.$base.XXXXXX" 2>/dev/null)" || return 0
+    if (IFS=$'\t'; printf '%s\n' "$*") > "$tmp_file" 2>/dev/null; then
+        mv -f "$tmp_file" "$file" 2>/dev/null || rm -f "$tmp_file"
+    else
+        rm -f "$tmp_file"
+    fi
+}
+
+# interval_epoch_within <epoch> <days>: the epoch is well formed and less than
+# <days> old. No leading zero (Bash would parse it as octal), at most 12
+# digits (no overflow), and a future timestamp (clock skew) counts as stale.
+interval_epoch_within() {
+    [[ "$1" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    local age=$(( $(date +%s) - $1 ))
+    (( age >= 0 && age < $2 * 86400 ))
+}
+
+# interval_is_fresh <name> <days> [<fingerprint>]: succeeds, setting
+# INTERVAL_SKIP_REASON, when <name> last succeeded less than <days> ago (and,
+# if given, with the same fingerprint). Days 0 or --force-intervals: never.
+interval_is_fresh() {
+    local name="$1" days="$2" fingerprint="${3-}" file epoch recorded extra
+    INTERVAL_SKIP_REASON=""
+    [[ "$FORCE_INTERVALS" != true ]] || return 1
+    (( days > 0 )) || return 1
+    file="$(interval_state_file "$name")"
+    [[ -f "$file" ]] || return 1
+    # Redirect stderr first so an unreadable file stays quiet.
+    IFS=$'\t' read -r epoch recorded extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
+    if [[ $# -ge 3 ]]; then
+        [[ -n "${recorded:-}" && "$recorded" == "$fingerprint" ]] || return 1
+    fi
+    interval_epoch_within "$epoch" "$days" || return 1
+    INTERVAL_SKIP_REASON="⏭️ Skipped (last run $(macos_check_format_epoch "$epoch"), next after $(macos_check_format_epoch $(( epoch + days * 86400 ))))"
 }
 
 # Format an epoch with the shell builtin; external `date -r` differs between
@@ -486,7 +544,7 @@ macos_check_format_epoch() {
 }
 
 macos_check_state_file() {
-    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/update-all/macos-check"
+    interval_state_file macos-check
 }
 
 # Current macOS build (e.g. 25A354), or "unknown". Stored with each check so
@@ -506,9 +564,7 @@ macos_check_read_state() {
     [[ -f "$file" ]] || return 1
     # Redirect stderr first so an unreadable file stays quiet.
     IFS=$'\t' read -r epoch result build extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
-    # No leading zero (Bash would parse it as octal) and at most 12 digits
-    # (no arithmetic overflow); anything else is treated as stale.
-    [[ "$epoch" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    interval_epoch_within "$epoch" "$MACOS_CHECK_INTERVAL_DAYS" || return 1
     [[ "$result" == up-to-date || "$result" == updates-available ]] || return 1
     # A different (or missing) build means macOS changed since the check.
     [[ -n "${build:-}" && "$build" == "$(macos_check_current_build)" ]] || return 1
@@ -516,18 +572,7 @@ macos_check_read_state() {
 }
 
 macos_check_write_state() {
-    local file dir tmp_file
-    file="$(macos_check_state_file)"
-    dir="$(dirname "$file")"
-    mkdir -p "$dir" 2>/dev/null || return 0
-    # Drop temp files left by runs killed between mktemp and mv.
-    rm -f "$dir"/.macos-check.?????? 2>/dev/null || true
-    tmp_file="$(mktemp "$dir/.macos-check.XXXXXX" 2>/dev/null)" || return 0
-    if printf '%s\t%s\t%s\n' "$(date +%s)" "$1" "$(macos_check_current_build)" > "$tmp_file" 2>/dev/null; then
-        mv -f "$tmp_file" "$file" 2>/dev/null || rm -f "$tmp_file"
-    else
-        rm -f "$tmp_file"
-    fi
+    interval_write_state macos-check "$(date +%s)" "$1" "$(macos_check_current_build)"
 }
 
 check_macos_updates() {
@@ -536,23 +581,18 @@ check_macos_updates() {
         return
     fi
 
-    if (( MACOS_CHECK_INTERVAL_DAYS > 0 )); then
-        local state last_epoch last_result now age last_label
+    if [[ "$FORCE_INTERVALS" != true ]] && (( MACOS_CHECK_INTERVAL_DAYS > 0 )); then
+        local state last_epoch last_result last_label
         if state="$(macos_check_read_state)"; then
             read -r last_epoch last_result <<< "$state"
-            now="$(date +%s)"
-            age=$(( now - last_epoch ))
-            # A future timestamp (clock skew) counts as stale.
-            if (( age >= 0 && age < MACOS_CHECK_INTERVAL_DAYS * 86400 )); then
-                last_label="$(macos_check_format_epoch "$last_epoch")"
-                # Pending updates stay a warning in the summary and receipt.
-                if [[ "$last_result" == updates-available ]]; then
-                    log_status "macOS Updates" "⚠️ Updates available (cached, checked $last_label; UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS=0 to recheck)"
-                else
-                    log_status "macOS Updates" "⏭️ Skipped (up to date as of $last_label)"
-                fi
-                return 0
+            last_label="$(macos_check_format_epoch "$last_epoch")"
+            # Pending updates stay a warning in the summary and receipt.
+            if [[ "$last_result" == updates-available ]]; then
+                log_status "macOS Updates" "⚠️ Updates available (cached, checked $last_label; --force-intervals to recheck)"
+            else
+                log_status "macOS Updates" "⏭️ Skipped (up to date as of $last_label)"
             fi
+            return 0
         fi
     fi
 
@@ -999,6 +1039,7 @@ main() {
                 ;;
             --skip-commands) SKIP_COMMANDS=true ;;
             --force-commands) FORCE_COMMANDS=true ;;
+            --force-intervals) FORCE_INTERVALS=true ;;
             --help|-h)
                 cat <<EOF
 Usage: $SCRIPT_NAME [options]
@@ -1012,6 +1053,7 @@ Options:
   --commands-file PATH Use a custom commands file (default: $SCRIPT_DIR/update-all.commands)
   --skip-commands      Disable running custom commands
   --force-commands     Run custom commands even if they ran within the interval
+  --force-intervals    Ignore every *_INTERVAL_DAYS setting below for this run
   --help, -h           Show this help
 
 Environment:
@@ -1024,6 +1066,12 @@ Environment:
                               Run custom commands at most once per this many days
                               (0-99999, default: 7); 0 runs them every run. Editing
                               the commands file triggers a run
+  UPDATE_ALL_CASKS_INTERVAL_DAYS
+                              Upgrade self-updating Homebrew casks at most once per
+                              this many days (0-99999, default: 7); 0 every run
+  UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS
+                              Run brew cleanup at most once per this many days
+                              (0-99999, default: 7); 0 every run
 
 Subcommands:
   list                 List installed items without updating (see 'list --help')
@@ -1045,8 +1093,7 @@ EOF
 
     # 1. SETUP PHASE
     resolve_global_managers || exit 1
-    validate_macos_check_interval || exit 1
-    validate_commands_interval || exit 1
+    validate_intervals || exit 1
     acquire_lock
     REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
     if [[ ! -d "$REPORT_DIR" ]]; then

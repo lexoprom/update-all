@@ -517,14 +517,18 @@ class Doctor:
                     return
                 data = self.r.data('brew', 'outdated', '--json=v2', '--greedy-auto-updates')
                 entries = data['formulae'] + data['casks']
+                casks = {id(entry) for entry in data['casks']}
                 pinned = set(self.r.output('brew', 'list', '--pinned').splitlines())
                 for entry in entries:
                     name = entry.get('name') or entry['token']
                     pin = entry.get('pinned', False) or name in pinned
+                    # update-all upgrades auto_updates casks only every few days
+                    # (UPDATE_ALL_CASKS_INTERVAL_DAYS); --force-intervals runs it now.
+                    run = 'Run update-all --force-intervals' if id(entry) in casks else 'Run update-all'
                     self.emit('INFO' if pin else 'WARN', 'brew: ' + name + (' is pinned' if pin else ' has an update'),
                               '{} -> {}'.format(entry.get('installed_versions', entry.get('installed', '?')),
                                                 entry.get('current_version', '?')),
-                              '' if pin else 'Run update-all, or review brew upgrade --greedy-auto-updates ' + shlex.quote(name))
+                              '' if pin else run + ', or review brew upgrade --greedy-auto-updates ' + shlex.quote(name))
                 if not entries:
                     self.emit('OK', 'brew: no remaining updates')
             elif manager == 'mise':

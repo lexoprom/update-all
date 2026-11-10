@@ -47,6 +47,16 @@ runs still report them as a warning.
 UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS=0 update-all   # force a check now
 ```
 
+Two Homebrew steps also run on an interval (both default 7 days; 0 runs them
+every time): the `auto_updates` cask upgrade (`UPDATE_ALL_CASKS_INTERVAL_DAYS`),
+since most of those apps update themselves and upgrading reinstalls running
+apps, and `brew cleanup` (`UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS`), since
+`brew upgrade` already removes the versions it replaces. Only successful real
+runs are recorded, in `brew-casks` and `brew-cleanup` next to `macos-check`.
+
+`--force-intervals` ignores every interval (macOS check, custom commands, casks,
+cleanup) for one run.
+
 ## Doctor
 
 Doctor checks manager inventories, missing installations and executables,

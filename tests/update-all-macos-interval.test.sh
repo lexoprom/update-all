@@ -124,6 +124,13 @@ test_interval_zero_always_checks() {
   assert_count "$d" 2
 }
 
+test_force_intervals_checks() {
+  local d="$tmp/force-intervals"; setup_case "$d"
+  seed_state "$d" "$(date +%s)" up-to-date
+  run_expect "$d" 0 --force-intervals
+  assert_count "$d" 1
+}
+
 test_stale_state_checks() {
   local d="$tmp/stale"; setup_case "$d"
   seed_state "$d" "$(( $(date +%s) - 3 * 86400 ))" up-to-date
@@ -178,7 +185,7 @@ test_cached_updates_stay_a_warning() {
   run_expect "$d" 0
   assert_count "$d" 1
   assert_contains "$OUT" "Updates available (cached, checked"
-  assert_contains "$OUT" "UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS=0 to recheck"
+  assert_contains "$OUT" "--force-intervals to recheck"
   [[ "$(receipt_result "$d")" == warning ]] || fail "receipt should record warning, got $(receipt_result "$d")"
 }
 
@@ -254,6 +261,7 @@ trap cleanup EXIT
 
 test_second_run_is_skipped
 test_interval_zero_always_checks
+test_force_intervals_checks
 test_stale_state_checks
 test_custom_interval_respected
 test_bad_state_checks
