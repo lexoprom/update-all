@@ -63,6 +63,12 @@ TOOL_TIMEOUT_SECONDS="${UPDATE_ALL_TOOL_TIMEOUT:-3600}"
 # Skip the (slow) `softwareupdate -l` check if one succeeded within this many
 # days; 0 checks on every run. Override with UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS.
 MACOS_CHECK_INTERVAL_DAYS="${UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS:-2}"
+# Run the custom commands file at most once per this many days; 0 runs it on
+# every run. Override with UPDATE_ALL_COMMANDS_INTERVAL_DAYS, or bypass once
+# with --force-commands. Editing the commands file also triggers a run.
+COMMANDS_INTERVAL_DAYS="${UPDATE_ALL_COMMANDS_INTERVAL_DAYS:-7}"
+FORCE_COMMANDS=false
+COMMANDS_SKIP_REASON=""
 
 resolve_script_path() {
     local path="$1"
@@ -362,7 +368,66 @@ run_custom_command() {
 
 update_custom_commands() {
     declare -A result=()
-    custom_commands_run result "$COMMANDS_FILE" "$REPORT_DIR" "$DRY_RUN" log_status run_custom_command
+    local rc=0
+    custom_commands_run result "$COMMANDS_FILE" "$REPORT_DIR" "$DRY_RUN" log_status run_custom_command || rc=$?
+    # Record only fully successful real runs, so failures retry next time.
+    if [[ $rc -eq 0 && "$DRY_RUN" != true ]]; then
+        commands_interval_write_state
+    fi
+    return "$rc"
+}
+
+commands_interval_state_file() {
+    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/update-all/commands-last-run"
+}
+
+# Checksum of the commands file, so edits invalidate the recorded run.
+commands_file_checksum() {
+    local sum
+    sum="$(cksum < "$COMMANDS_FILE" 2>/dev/null)" || sum=""
+    sum="${sum%% *}"
+    [[ "$sum" =~ ^[0-9]+$ ]] || sum="unknown"
+    printf '%s\n' "$sum"
+}
+
+commands_interval_write_state() {
+    local file dir tmp_file
+    file="$(commands_interval_state_file)"
+    dir="$(dirname "$file")"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    rm -f "$dir"/.commands-last-run.?????? 2>/dev/null || true
+    tmp_file="$(mktemp "$dir/.commands-last-run.XXXXXX" 2>/dev/null)" || return 0
+    if printf '%s\t%s\n' "$(date +%s)" "$(commands_file_checksum)" > "$tmp_file" 2>/dev/null; then
+        mv -f "$tmp_file" "$file" 2>/dev/null || rm -f "$tmp_file"
+    else
+        rm -f "$tmp_file"
+    fi
+}
+
+# Succeeds (and sets COMMANDS_SKIP_REASON) when the commands ran recently
+# enough, from the same commands file, that this run should skip them.
+commands_interval_is_fresh() {
+    COMMANDS_SKIP_REASON=""
+    [[ "$FORCE_COMMANDS" != true ]] || return 1
+    (( COMMANDS_INTERVAL_DAYS > 0 )) || return 1
+    local file epoch sum extra now age
+    file="$(commands_interval_state_file)"
+    [[ -f "$file" ]] || return 1
+    IFS=$'\t' read -r epoch sum extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
+    [[ "$epoch" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    [[ -n "${sum:-}" && "$sum" == "$(commands_file_checksum)" ]] || return 1
+    now="$(date +%s)"
+    age=$(( now - epoch ))
+    (( age >= 0 && age < COMMANDS_INTERVAL_DAYS * 86400 )) || return 1
+    COMMANDS_SKIP_REASON="⏭️ Skipped (last run $(macos_check_format_epoch "$epoch"), next after $(macos_check_format_epoch $(( epoch + COMMANDS_INTERVAL_DAYS * 86400 ))); --force-commands to run now)"
+}
+
+validate_commands_interval() {
+    if [[ ! "$COMMANDS_INTERVAL_DAYS" =~ ^[0-9]{1,5}$ ]]; then
+        echo "UPDATE_ALL_COMMANDS_INTERVAL_DAYS: expected a whole number of days from 0 to 99999, got '$COMMANDS_INTERVAL_DAYS'" >&2
+        return 1
+    fi
+    COMMANDS_INTERVAL_DAYS=$((10#$COMMANDS_INTERVAL_DAYS))
 }
 
 update_global_packages() {
@@ -537,9 +602,16 @@ global_packages_tool_components() {
 }
 
 custom_commands_tool_enabled() {
-    custom_commands_should_run "$SKIP_COMMANDS" "$COMMANDS_FILE"
+    custom_commands_should_run "$SKIP_COMMANDS" "$COMMANDS_FILE" || return 1
+    ! commands_interval_is_fresh
 }
 custom_commands_tool_disabled() {
+    # Recompute: the enabled check may have run in a subshell.
+    if [[ "$SKIP_COMMANDS" != true ]] && custom_commands_has_entries "$COMMANDS_FILE" \
+        && commands_interval_is_fresh; then
+        log_status "custom commands" "$COMMANDS_SKIP_REASON"
+        return 0
+    fi
     custom_commands_handle_disabled "$SKIP_COMMANDS" log_status "$COMMANDS_FILE"
 }
 custom_commands_tool_components() { printf '%s\n' "custom commands"; }
@@ -926,6 +998,7 @@ main() {
                 COMMANDS_FILE="$1"
                 ;;
             --skip-commands) SKIP_COMMANDS=true ;;
+            --force-commands) FORCE_COMMANDS=true ;;
             --help|-h)
                 cat <<EOF
 Usage: $SCRIPT_NAME [options]
@@ -938,6 +1011,7 @@ Options:
   --force              Force run even if lock exists
   --commands-file PATH Use a custom commands file (default: $SCRIPT_DIR/update-all.commands)
   --skip-commands      Disable running custom commands
+  --force-commands     Run custom commands even if they ran within the interval
   --help, -h           Show this help
 
 Environment:
@@ -946,6 +1020,10 @@ Environment:
   UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS
                               Skip the macOS update check if one succeeded within
                               this many days (0-99999, default: 2); 0 checks every run
+  UPDATE_ALL_COMMANDS_INTERVAL_DAYS
+                              Run custom commands at most once per this many days
+                              (0-99999, default: 7); 0 runs them every run. Editing
+                              the commands file triggers a run
 
 Subcommands:
   list                 List installed items without updating (see 'list --help')
@@ -968,6 +1046,7 @@ EOF
     # 1. SETUP PHASE
     resolve_global_managers || exit 1
     validate_macos_check_interval || exit 1
+    validate_commands_interval || exit 1
     acquire_lock
     REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
     if [[ ! -d "$REPORT_DIR" ]]; then

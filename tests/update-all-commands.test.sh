@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Tests expect the default manager list regardless of the caller's setup.
-unset UPDATE_ALL_GLOBAL_MANAGERS
+unset UPDATE_ALL_GLOBAL_MANAGERS UPDATE_ALL_COMMANDS_INTERVAL_DAYS
 
 strip_ansi() {
   perl -pe 's/\e\[[0-9;]*[mK]//g'
@@ -319,6 +319,72 @@ test_default_commands_file_pnpm_recovery_command() {
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 cleanup() { rm -rf "$tmp"; }
+# Commands append to a marker file so each real run is countable.
+write_marker_commands() {
+  cat > "$1/update-all.commands" <<'EOF'
+echo ran >> "$HOME/ran"
+EOF
+}
+
+marker_count() {
+  if [[ -f "$1/home/ran" ]]; then wc -l < "$1/home/ran" | tr -d ' '; else echo 0; fi
+}
+
+test_commands_interval_skips_recent_run() {
+  local case_dir="$tmp/interval-skip"
+  setup_case "$case_dir"
+  write_marker_commands "$case_dir"
+
+  run_case "$case_dir" >/dev/null
+  [[ "$(marker_count "$case_dir")" == 1 ]] || fail "first run did not run commands"
+
+  local out
+  out="$(run_case "$case_dir")"
+  [[ "$(marker_count "$case_dir")" == 1 ]] || fail "commands re-ran within the interval"
+  assert_contains "$out" "Skipped (last run"
+  assert_not_contains "$out" "Running custom commands"
+}
+
+test_commands_interval_force_and_zero() {
+  local case_dir="$tmp/interval-force"
+  setup_case "$case_dir"
+  write_marker_commands "$case_dir"
+
+  run_case "$case_dir" >/dev/null
+  run_case "$case_dir" --force-commands >/dev/null
+  [[ "$(marker_count "$case_dir")" == 2 ]] || fail "--force-commands did not run commands"
+  UPDATE_ALL_COMMANDS_INTERVAL_DAYS=0 run_case "$case_dir" >/dev/null
+  [[ "$(marker_count "$case_dir")" == 3 ]] || fail "interval 0 did not run commands"
+}
+
+test_commands_interval_reruns_after_edit_or_failure() {
+  local case_dir="$tmp/interval-edit"
+  setup_case "$case_dir"
+  write_marker_commands "$case_dir"
+
+  run_case "$case_dir" >/dev/null
+  printf '%s\n' '# edited' >> "$case_dir/update-all.commands"
+  run_case "$case_dir" >/dev/null
+  [[ "$(marker_count "$case_dir")" == 2 ]] || fail "editing the commands file did not trigger a run"
+
+  local fail_dir="$tmp/interval-failure"
+  setup_case "$fail_dir"
+  cat > "$fail_dir/update-all.commands" <<'EOF'
+echo ran >> "$HOME/ran"; false
+EOF
+  run_case "$fail_dir" >/dev/null || true
+  run_case "$fail_dir" >/dev/null || true
+  [[ "$(marker_count "$fail_dir")" == 2 ]] || fail "failed commands were not retried"
+}
+
+test_commands_interval_rejects_invalid_value() {
+  local case_dir="$tmp/interval-invalid"
+  setup_case "$case_dir"
+  local out
+  out="$(UPDATE_ALL_COMMANDS_INTERVAL_DAYS=week run_case "$case_dir" --dry-run || true)"
+  assert_contains "$out" "UPDATE_ALL_COMMANDS_INTERVAL_DAYS: expected a whole number"
+}
+
 trap cleanup EXIT
 
 test_default_commands_file_runs_last
@@ -332,5 +398,9 @@ test_global_managers_subset
 test_global_managers_newline_separated
 test_global_managers_unknown_name_fails_fast
 test_default_commands_file_pnpm_recovery_command
+test_commands_interval_skips_recent_run
+test_commands_interval_force_and_zero
+test_commands_interval_reruns_after_edit_or_failure
+test_commands_interval_rejects_invalid_value
 
 echo "PASS"

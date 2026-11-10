@@ -19,6 +19,11 @@ serial because pkg installers may prompt for a sudo password), then mise (after
 Homebrew, which may upgrade mise itself), then global package managers, then
 custom commands.
 
+Custom commands run at most once every `UPDATE_ALL_COMMANDS_INTERVAL_DAYS` days
+(default 7; 0 runs them every time). A run is recorded only when every command
+succeeds, and editing the commands file triggers a run. `--force-commands`
+runs them now regardless.
+
 `UPDATE_ALL_GLOBAL_MANAGERS` selects the global package managers to update
 (space-separated, default `pipx npm pnpm bun uv`). Set it to an empty string
 when mise owns all global CLIs: the stage is skipped, so `npm install -g` never
