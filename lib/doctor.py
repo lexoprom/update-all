@@ -476,10 +476,24 @@ class Doctor:
         if not active:
             self.emit('WARN', manager + ': command is not on updater PATH: ' + name, str(target),
                       'Check the manager bin directory and shell PATH.')
-        elif self.resolved(active, name) != os.path.realpath(target):
+        elif self.resolved(active, name) != os.path.realpath(target) and \
+                not self.mise_npm_overrides_node(name, [self.resolved(active, name), os.path.realpath(target)]):
             self.emit('INFO', manager + ': another installation provides ' + name,
                       '{}; package executable: {}'.format(active, target),
                       'Review which installation should provide this command.')
+
+    def mise_tool(self, path):
+        """The mise tool (installs/<tool>/...) that owns a resolved path, if any."""
+        installs = Path(os.path.realpath(self.r.shim_dir.parent / 'installs'))
+        try:
+            return Path(os.path.realpath(path)).relative_to(installs).parts[0]
+        except (ValueError, IndexError):
+            return None
+
+    def mise_npm_overrides_node(self, name, resolved_paths):
+        """A mise `npm` tool deliberately shadowing the npm/npx bundled with mise's node."""
+        return (name in ('npm', 'npx') and len(resolved_paths) == 2
+                and {self.mise_tool(p) for p in resolved_paths} == {'npm', 'node'})
 
     def resolved(self, path, name):
         if not path:
@@ -530,7 +544,7 @@ class Doctor:
                               'target: ' + os.readlink(path), 'Repair or remove this link after checking its owner.')
                 elif path.is_file() and os.access(path, os.X_OK):
                     found[self.resolved(str(path), name)] = str(path)
-            if len(found) > 1:
+            if len(found) > 1 and not self.mise_npm_overrides_node(name, list(found)):
                 self.emit('INFO', 'PATH: multiple installations of ' + name, '\n'.join(found.values()),
                           'Review before removing any installation.')
         for group in (('npm', 'pnpm', 'bun'), ('pipx', 'uv')):

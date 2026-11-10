@@ -241,6 +241,34 @@ class DoctorTests(unittest.TestCase):
         self.assertIn('broken link', text)
         self.assertNotIn('multiple installations of tool', text)
 
+    def test_mise_npm_tool_overriding_node_bundled_npm_is_not_reported(self):
+        installs = self.root / '.local/share/mise/installs'
+        shim = self.root / '.local/share/mise/shims'
+        tool = installs / 'npm/latest/package/bin'
+        bundled = installs / 'node/26/bin'
+        other = self.root / 'other/bin'
+        for directory in (shim, tool, bundled, other):
+            directory.mkdir(parents=True)
+            for name in ('npm', 'npx', 'node'):
+                (directory / name).write_text('#!/bin/sh\n')
+                (directory / name).chmod(0o755)
+        responses = {('mise', 'which', n): str(tool / n) for n in ('npm', 'npx')}
+        responses[('mise', 'which', 'node')] = str(bundled / 'node')
+        r = FakeRunner(responses, ['mise'])
+        r.env['PATH'] = str(shim) + ':' + str(bundled)
+        doc = d.Doctor(r, original_path=r.env['PATH'])
+        doc.commands = {'npm', 'npx'}
+        _, text = self.output(doc.paths)
+        self.assertNotIn('multiple installations', text)
+        _, text = self.output(lambda: doc.check_exposure('npm', 'npm', bundled / 'npm'))
+        self.assertNotIn('another installation provides', text)
+        # Any other second installation is still reported.
+        r.env['PATH'] = str(shim) + ':' + str(other)
+        doc = d.Doctor(r, original_path=r.env['PATH'])
+        doc.commands = {'npm'}
+        _, text = self.output(doc.paths)
+        self.assertIn('multiple installations of npm', text)
+
     def test_valid_mise_shim_is_equivalent_to_real_binary(self):
         shim = self.root / '.local/share/mise/shims'
         real = self.root / 'runtime/bin'
