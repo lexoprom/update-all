@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# shellcheck source=./common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
 declare -ag TOOL_RUNNER_IDS=()
 declare -ag TOOL_RUNNER_PHASE_ORDER=()
 declare -gA TOOL_RUNNER_PHASE_MODES=()
@@ -54,38 +57,25 @@ tool_runner_register() {
     TOOL_RUNNER_DISABLED_FNS["$id"]="$disabled_fn"
 }
 
-_tool_runner_call_if_defined() {
-    local fn="$1"
-    shift || true
-    [[ -n "$fn" ]] || return 1
-    declare -F "$fn" >/dev/null || return 1
-    "$fn" "$@"
-}
-
 _tool_runner_is_enabled() {
     local id="$1"
-    _tool_runner_call_if_defined "${TOOL_RUNNER_ENABLED_FNS[$id]-}"
+    call_if_defined "${TOOL_RUNNER_ENABLED_FNS[$id]-}"
 }
 
 _tool_runner_run() {
     local id="$1"
-    local exit_code
-    local previous_errexit=0
+    local exit_code=0
 
-    [[ $- == *e* ]] && previous_errexit=1
-    set +e
-    _tool_runner_call_if_defined "${TOOL_RUNNER_RUN_FNS[$id]-}"
-    exit_code=$?
+    call_if_defined "${TOOL_RUNNER_RUN_FNS[$id]-}" || exit_code=$?
     if [[ -n "${REPORT_DIR:-}" && -d "$REPORT_DIR" ]]; then
         printf '%s\t%s\n' "$id" "$exit_code" >> "$REPORT_DIR/stages.tsv"
     fi
-    if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
     return "$exit_code"
 }
 
 _tool_runner_handle_disabled() {
     local id="$1"
-    _tool_runner_call_if_defined "${TOOL_RUNNER_DISABLED_FNS[$id]-}"
+    call_if_defined "${TOOL_RUNNER_DISABLED_FNS[$id]-}"
 }
 
 _tool_runner_emit_progress() {
@@ -93,84 +83,59 @@ _tool_runner_emit_progress() {
     local current="$2"
     local total="$3"
     local label="$4"
-    _tool_runner_call_if_defined "$progress_fn" "$current" "$total" "$label" || true
+    call_if_defined "$progress_fn" "$current" "$total" "$label" || true
 }
 
 tool_runner_count_enabled() {
     local count=0
     local id
     for id in "${TOOL_RUNNER_IDS[@]}"; do
-        if _tool_runner_is_enabled "$id"; then
-            ((count++))
-        fi
+        _tool_runner_is_enabled "$id" && count=$((count + 1))
     done
     echo "$count"
 }
 
-_tool_runner_wait_for_jobs() {
-    local -a jobs=("$@")
-    local pid
-    local previous_errexit=0
-
-    [[ $- == *e* ]] && previous_errexit=1
-    for pid in "${jobs[@]}"; do
-        set +e
-        wait "$pid"
-        if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
-    done
-
-    return 0
-}
-
-_tool_runner_run_parallel_phase() {
+# Run one phase. Parallel phases start every enabled tool in the background
+# and wait for all of them; serial phases run them in order and also report
+# disabled tools through their disabled handler.
+_tool_runner_run_phase() {
     local phase="$1"
-    local progress_fn="$2"
-    local total="$3"
-    local -n _current="$4"
+    local mode="$2"
+    local progress_fn="$3"
+    local total="$4"
+    local -n _current="$5"
     local -a jobs=()
-    local id
-    local label
+    local id pid
     local wait_message="${TOOL_RUNNER_PHASE_WAIT_MESSAGES[$phase]-}"
     local dim="${DIM:-\033[2m}"
     local nc="${NC:-\033[0m}"
 
     for id in "${TOOL_RUNNER_IDS[@]}"; do
         [[ "${TOOL_RUNNER_PHASES[$id]-}" == "$phase" ]] || continue
-        _tool_runner_is_enabled "$id" || continue
+        if ! _tool_runner_is_enabled "$id"; then
+            # A tool without a disabled handler is simply not reported.
+            [[ "$mode" == serial ]] && { _tool_runner_handle_disabled "$id" || true; }
+            continue
+        fi
 
         _current=$((_current + 1))
-        label="${TOOL_RUNNER_LABELS[$id]-$id}"
-        _tool_runner_emit_progress "$progress_fn" "$_current" "$total" "$label"
+        _tool_runner_emit_progress "$progress_fn" "$_current" "$total" "${TOOL_RUNNER_LABELS[$id]-$id}"
 
-        (_tool_runner_run "$id") &
-        jobs+=("$!")
+        if [[ "$mode" == parallel ]]; then
+            (_tool_runner_run "$id") &
+            jobs+=("$!")
+        else
+            _tool_runner_run "$id" || true
+        fi
     done
 
     if [[ ${#jobs[@]} -gt 0 ]]; then
         [[ -n "$wait_message" ]] && printf '  %b·  %s%b\n' "$dim" "$wait_message" "$nc"
-        _tool_runner_wait_for_jobs "${jobs[@]}"
+        for pid in "${jobs[@]}"; do
+            wait "$pid" || true
+        done
     fi
-}
-
-_tool_runner_run_serial_phase() {
-    local phase="$1"
-    local progress_fn="$2"
-    local total="$3"
-    local -n _current="$4"
-    local id
-    local label
-
-    for id in "${TOOL_RUNNER_IDS[@]}"; do
-        [[ "${TOOL_RUNNER_PHASES[$id]-}" == "$phase" ]] || continue
-        if _tool_runner_is_enabled "$id"; then
-            _current=$((_current + 1))
-            label="${TOOL_RUNNER_LABELS[$id]-$id}"
-            _tool_runner_emit_progress "$progress_fn" "$_current" "$total" "$label"
-            _tool_runner_run "$id" || true
-        else
-            _tool_runner_handle_disabled "$id"
-        fi
-    done
+    return 0
 }
 
 tool_runner_generate_summary() {
@@ -217,16 +182,16 @@ tool_runner_generate_summary() {
                 esac
                 printf '  %b%-28s%b %s\n' "$blue" "$component" "$nc" "${status[$component]}"
             fi
-        done < <(_tool_runner_call_if_defined "$components_fn" || true)
+        done < <(call_if_defined "$components_fn" || true)
     done
 
     printf '%b────────────────────────────────────────────%b\n' "$dim" "$nc"
-    if [[ $failed -gt 0 ]]; then
-        printf '%b%d items · %d failed%b' "$red" "$shown" "$failed" "$nc"
-        [[ $skipped -gt 0 ]] && printf '%b · %d skipped%b' "$dim" "$skipped" "$nc"
-        printf '\n'
-    elif [[ $simulated -gt 0 ]]; then
-        printf '%b%d items · %d simulated%b' "$yellow" "$shown" "$simulated" "$nc"
+    if [[ $failed -gt 0 || $simulated -gt 0 ]]; then
+        if [[ $failed -gt 0 ]]; then
+            printf '%b%d items · %d failed%b' "$red" "$shown" "$failed" "$nc"
+        else
+            printf '%b%d items · %d simulated%b' "$yellow" "$shown" "$simulated" "$nc"
+        fi
         [[ $skipped -gt 0 ]] && printf '%b · %d skipped%b' "$dim" "$skipped" "$nc"
         printf '\n'
     fi
@@ -234,8 +199,7 @@ tool_runner_generate_summary() {
 
     # Surface failed components in the script's exit status so wrappers and
     # history can detect partial failures.
-    [[ $failed -gt 0 ]] && return 1
-    return 0
+    [[ $failed -eq 0 ]]
 }
 
 tool_runner_execute() {
@@ -250,8 +214,7 @@ tool_runner_execute() {
     for phase in "${TOOL_RUNNER_PHASE_ORDER[@]}"; do
         mode="${TOOL_RUNNER_PHASE_MODES[$phase]-serial}"
         case "$mode" in
-            parallel) _tool_runner_run_parallel_phase "$phase" "$progress_fn" "$total" current ;;
-            serial) _tool_runner_run_serial_phase "$phase" "$progress_fn" "$total" current ;;
+            parallel|serial) _tool_runner_run_phase "$phase" "$mode" "$progress_fn" "$total" current ;;
             *) echo "Unknown tool runner phase mode: $mode" >&2; return 1 ;;
         esac
     done

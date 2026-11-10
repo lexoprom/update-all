@@ -15,7 +15,7 @@ find_modern_bash() {
 
     for candidate in "${candidates[@]}"; do
         [[ -x "$candidate" ]] || continue
-        "$candidate" -c 'exit $(( BASH_VERSINFO[0] >= 4 ? 0 : 1 ))' >/dev/null 2>&1 || continue
+        "$candidate" -c 'exit $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 ? 0 : 1 ))' >/dev/null 2>&1 || continue
         printf '%s\n' "$candidate"
         return 0
     done
@@ -23,13 +23,15 @@ find_modern_bash() {
     return 1
 }
 
-if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
+# Namerefs (local -n) need Bash 4.3; expanding empty arrays under `set -u`
+# needs 4.4.
+if (( ${BASH_VERSINFO[0]:-0} * 100 + ${BASH_VERSINFO[1]:-0} < 404 )); then
     if MODERN_BASH="$(find_modern_bash)"; then
         exec "$MODERN_BASH" "$0" "$@"
     fi
 
     cat >&2 <<'EOF'
-update-all requires Bash 4 or newer.
+update-all requires Bash 4.4 or newer.
 macOS ships Bash 3.2 at /bin/bash, which cannot run this script.
 Install a newer Bash, for example:
   brew install bash
@@ -38,7 +40,7 @@ EOF
     exit 1
 fi
 
-# Simplified Universal System & Tool Updater - macOS Bash Version (Final Robust)
+# Updates Homebrew, mise, global package managers and custom commands on macOS.
 set -euo pipefail
 
 # Configuration
@@ -48,6 +50,7 @@ FORCE_RUN=false
 SCRIPT_NAME="$(basename "$0")"
 LOCK_FILE="/tmp/.${SCRIPT_NAME}_lock"
 LOCK_ACQUIRED=false
+LOCK_TMP_FILE=""
 REPORT_DIR=""
 SKIP_COMMANDS=false
 COMMANDS_FILE=""
@@ -114,6 +117,15 @@ readonly NC='\033[0m'
 # Cleanup on exit
 cleanup() {
     local exit_code=$?
+    # Background stages ignore SIGINT (asynchronous commands in a
+    # non-interactive shell), so stop any still running before releasing the
+    # lock. `jobs -p` lists only this shell's own background jobs.
+    local -a running_jobs=()
+    mapfile -t running_jobs < <(jobs -p)
+    if [[ ${#running_jobs[@]} -gt 0 ]]; then
+        kill_process_tree "${running_jobs[@]}"
+    fi
+    [[ -z "$LOCK_TMP_FILE" ]] || rm -f "$LOCK_TMP_FILE"
     if [[ "$HISTORY_ACTIVE" == true ]]; then
         "$HISTORY_PYTHON" "$SCRIPT_DIR/lib/doctor.py" interrupt "$REPORT_DIR" >/dev/null 2>&1 || true
     fi
@@ -165,6 +177,33 @@ process_tree_pids() {
     printf '%s\n' "$pid"
 }
 
+# Terminate running processes and all their descendants: SIGTERM, then
+# SIGKILL only for those still running after up to 2 seconds. Exited PIDs are
+# skipped, so a recycled PID is not signalled.
+kill_process_tree() {
+    local pid target tries
+    local -a targets=() survivors=()
+    for pid in "$@"; do
+        kill -0 "$pid" 2>/dev/null || continue
+        mapfile -t -O "${#targets[@]}" targets < <(process_tree_pids "$pid")
+    done
+    [[ ${#targets[@]} -gt 0 ]] || return 0
+    for target in "${targets[@]}"; do
+        kill -TERM "$target" 2>/dev/null || true
+    done
+    for (( tries = 0; tries < 20; tries++ )); do
+        survivors=()
+        for target in "${targets[@]}"; do
+            kill -0 "$target" 2>/dev/null && survivors+=("$target")
+        done
+        [[ ${#survivors[@]} -gt 0 ]] || return 0
+        sleep 0.1
+    done
+    for target in "${survivors[@]}"; do
+        kill -KILL "$target" 2>/dev/null || true
+    done
+}
+
 # Wait for command completion through a pipe. Returns 124 when it exceeds
 # timeout_secs; the whole process tree is terminated so orphaned children
 # cannot keep stdout open and block command substitution forever.
@@ -176,8 +215,7 @@ run_with_timeout() (
         return $?
     fi
 
-    local pid exit_code=0 target
-    local -a targets=()
+    local pid exit_code=0
     # Keep descriptor changes local to this subshell. Command output keeps
     # going to stdout; only its exit status is sent through the completion pipe.
     exec 3>&1
@@ -187,98 +225,55 @@ run_with_timeout() (
     )
     pid=$!
     exec 3>&-
+    # The command runs asynchronously and so ignores SIGINT; on Ctrl-C or
+    # SIGTERM, stop it here, or it keeps the output pipe open and blocks the
+    # caller until it finishes on its own.
+    trap 'kill_process_tree "$pid"; exit 130' INT
+    trap 'kill_process_tree "$pid"; exit 143' TERM
     if IFS= read -r -t "$timeout_secs" exit_code <&4; then
         exec 4<&-
         wait "$pid" 2>/dev/null || true
         return "$exit_code"
     fi
 
-    mapfile -t targets < <(process_tree_pids "$pid")
-    for target in "${targets[@]}"; do
-        kill -TERM "$target" 2>/dev/null || true
-    done
-    sleep 2
-    for target in "${targets[@]}"; do
-        kill -KILL "$target" 2>/dev/null || true
-    done
+    kill_process_tree "$pid"
     exec 4<&-
     wait "$pid" 2>/dev/null || true
     return 124
 )
 
-# Execute command with proper error handling and reporting
-safe_execute() {
-    local description="$1"
-    shift
-    if [[ "$DRY_RUN" = true ]]; then
-        printf '  %b↳%b  Would execute: %s\n' "$CYAN" "$NC" "$*"
-        log_status "$description" "🔍 Dry run"
-        return 0
-    fi
-
-    [[ "$VERBOSE" = true ]] && printf '  %b↳%b  Executing: %s\n' "$CYAN" "$NC" "$*"
-
-    local output exit_code
-    local previous_errexit=0
-    [[ $- == *e* ]] && previous_errexit=1
-
-    set +e
-    output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" "$@" 2>&1)
-    exit_code=$?
-    if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
-
-    if [[ $exit_code -eq 0 ]]; then
-        log_status "$description" "✅ Success"
-        [[ "$VERBOSE" = true ]] && printf '  %b✓%b  %s completed\n' "$GREEN" "$NC" "$description"
-    else
-        if [[ $exit_code -eq 124 ]]; then
-            log_status "$description" "❌ Failed (timed out after ${TOOL_TIMEOUT_SECONDS}s)"
-        else
-            log_status "$description" "❌ Failed (exit code: $exit_code)"
-        fi
-        printf '  %b✗%b  %s failed (exit code %s)\n' "$RED" "$NC" "$description" "$exit_code"
-        if [[ $exit_code -eq 124 ]]; then
-            printf '     %bTimed out after %ss%b\n' "$DIM" "$TOOL_TIMEOUT_SECONDS" "$NC"
-        fi
-        local cmd_str="$*"
-        printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$cmd_str"
-        if [[ -n "$output" ]]; then
-            while IFS= read -r line; do
-                printf '     %s\n' "$line"
-            done <<< "$output"
-        fi
-    fi
-    return $exit_code
-}
-
-# Like safe_execute, but retries failed attempts before giving up. Transient
+# Run a command with the per-command timeout, capturing combined output.
+# Retries failed attempts (not timeouts) up to <max_attempts>. Transient
 # failures are common for mise's npm backend (aube): large tarball downloads
 # intermittently die mid-stream with "stream error ... HTTP error: error
 # decoding response body", and a retry typically succeeds. Only the final
 # attempt's output is printed and logged, so retries don't spam the report.
 # The delay can be overridden with UPDATE_ALL_RETRY_DELAY (seconds).
+# Usage: safe_execute_retry <max_attempts> <delay_seconds> <description> <cmd>...
 safe_execute_retry() {
     local max_attempts="$1"
     local delay_seconds="${UPDATE_ALL_RETRY_DELAY:-$2}"
     local description="$3"
     shift 3
 
-    if [[ "$DRY_RUN" = true || "$max_attempts" -le 1 ]]; then
-        safe_execute "$description" "$@"
-        return $?
+    if [[ "$DRY_RUN" = true ]]; then
+        printf '  %b↳%b  Would execute: %s\n' "$CYAN" "$NC" "$*"
+        log_status "$description" "🔍 Dry run"
+        return 0
     fi
 
-    local attempt=1
-    local output exit_code
-    local previous_errexit=0
+    local attempt=1 output exit_code line
     while :; do
-        [[ "$VERBOSE" = true ]] && printf '  %b↳%b  Executing (attempt %d/%d): %s\n' "$CYAN" "$NC" "$attempt" "$max_attempts" "$*"
+        if [[ "$VERBOSE" = true ]]; then
+            if (( max_attempts > 1 )); then
+                printf '  %b↳%b  Executing (attempt %d/%d): %s\n' "$CYAN" "$NC" "$attempt" "$max_attempts" "$*"
+            else
+                printf '  %b↳%b  Executing: %s\n' "$CYAN" "$NC" "$*"
+            fi
+        fi
 
-        [[ $- == *e* ]] && previous_errexit=1
-        set +e
-        output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" "$@" 2>&1)
-        exit_code=$?
-        if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
+        exit_code=0
+        output=$(run_with_timeout "$TOOL_TIMEOUT_SECONDS" "$@" 2>&1) || exit_code=$?
 
         if [[ $exit_code -eq 0 ]]; then
             log_status "$description" "✅ Success"
@@ -307,8 +302,7 @@ safe_execute_retry() {
     if [[ $exit_code -eq 124 ]]; then
         printf '     %bTimed out after %ss%b\n' "$DIM" "$TOOL_TIMEOUT_SECONDS" "$NC"
     fi
-    local cmd_str="$*"
-    printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$cmd_str"
+    printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$*"
     if [[ -n "$output" ]]; then
         while IFS= read -r line; do
             printf '     %s\n' "$line"
@@ -317,24 +311,55 @@ safe_execute_retry() {
     return $exit_code
 }
 
+# Execute a command once with error handling and status reporting.
+safe_execute() {
+    safe_execute_retry 1 0 "$@"
+}
+
+# Print the PID recorded in the lock file when that process is alive.
+lock_holder_pid() {
+    local lock_pid
+    [[ -f "$LOCK_FILE" ]] || return 1
+    lock_pid="$(cat "$LOCK_FILE" 2>/dev/null)" || return 1
+    [[ "$lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null || return 1
+    printf '%s\n' "$lock_pid"
+}
+
+# Publish the lock by hard-linking a file that already holds our PID: `ln`
+# fails when the lock exists, so the lock never appears empty or half
+# written. A stale lock (or with --force a live one) is removed and retried;
+# it is removed only if it still names the PID that was checked, which
+# narrows (but cannot fully close) the race between two stale takeovers.
 acquire_lock() {
-    if [[ -f "$LOCK_FILE" ]]; then
-        local lock_pid
-        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            if [[ "$FORCE_RUN" = true ]]; then
-                echo -e "${YELLOW}Warning: Forcibly removing existing lock file (PID: $lock_pid)${NC}"
-                rm -f "$LOCK_FILE"
-            else
+    local tmp lock_pid recorded attempt
+    # Global, so the exit trap removes it if we are interrupted here.
+    LOCK_TMP_FILE="$(mktemp "$LOCK_FILE.XXXXXX" 2>/dev/null)" || LOCK_TMP_FILE=""
+    tmp="$LOCK_TMP_FILE"
+    if [[ -z "$tmp" ]] || ! printf '%s\n' "$$" > "$tmp"; then
+        echo -e "${RED}Error: Could not create lock file $LOCK_FILE${NC}" >&2
+        exit 1
+    fi
+    for attempt in 1 2 3; do
+        if ln "$tmp" "$LOCK_FILE" 2>/dev/null; then
+            LOCK_ACQUIRED=true
+            rm -f "$tmp"
+            LOCK_TMP_FILE=""
+            return 0
+        fi
+        recorded="$(cat "$LOCK_FILE" 2>/dev/null)" || recorded=""
+        if lock_pid="$(lock_holder_pid)"; then
+            if [[ "$FORCE_RUN" != true ]]; then
                 echo -e "${RED}Error: Another instance is already running (PID: $lock_pid)${NC}"
                 exit 1
             fi
-        else
-            rm -f "$LOCK_FILE"
+            echo -e "${YELLOW}Warning: Forcibly removing existing lock file (PID: $lock_pid)${NC}"
         fi
-    fi
-    echo "$$" > "$LOCK_FILE"
-    LOCK_ACQUIRED=true
+        if [[ "$(cat "$LOCK_FILE" 2>/dev/null)" == "$recorded" ]]; then
+            rm -f "$LOCK_FILE" 2>/dev/null || true
+        fi
+    done
+    echo -e "${RED}Error: Could not create lock file $LOCK_FILE${NC}" >&2
+    exit 1
 }
 
 # --- UPDATE FUNCTIONS ---
@@ -478,11 +503,19 @@ validate_interval_days() {
     interval_days_ref=$((10#$interval_days_ref))
 }
 
+validate_tool_timeout() {
+    if [[ ! "$TOOL_TIMEOUT_SECONDS" =~ ^[0-9]{1,7}$ ]]; then
+        echo "UPDATE_ALL_TOOL_TIMEOUT: expected a whole number of seconds from 0 to 9999999, got '$TOOL_TIMEOUT_SECONDS'" >&2
+        return 1
+    fi
+    TOOL_TIMEOUT_SECONDS=$((10#$TOOL_TIMEOUT_SECONDS))
+}
+
 validate_intervals() {
-    validate_interval_days MACOS_CHECK_INTERVAL_DAYS UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS &&
-        validate_interval_days COMMANDS_INTERVAL_DAYS UPDATE_ALL_COMMANDS_INTERVAL_DAYS &&
-        validate_interval_days CASKS_INTERVAL_DAYS UPDATE_ALL_CASKS_INTERVAL_DAYS &&
-        validate_interval_days BREW_CLEANUP_INTERVAL_DAYS UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS
+    local name
+    for name in MACOS_CHECK COMMANDS CASKS BREW_CLEANUP; do
+        validate_interval_days "${name}_INTERVAL_DAYS" "UPDATE_ALL_${name}_INTERVAL_DAYS" || return 1
+    done
 }
 
 interval_state_file() {
@@ -507,6 +540,22 @@ interval_write_state() {
     fi
 }
 
+# interval_read_state <name> <var>...: read the tab-separated fields of a
+# state file into the named variables; fails when missing or empty.
+interval_read_state() {
+    local file
+    file="$(interval_state_file "$1")"
+    shift
+    [[ -f "$file" ]] || return 1
+    # Redirect stderr first so an unreadable file stays quiet.
+    IFS=$'\t' read -r "$@" 2>/dev/null < "$file" || [[ -n "${!1:-}" ]]
+}
+
+# interval_enabled <days>: intervals apply (days > 0, no --force-intervals).
+interval_enabled() {
+    [[ "$FORCE_INTERVALS" != true ]] && (( $1 > 0 ))
+}
+
 # interval_epoch_within <epoch> <days>: the epoch is well formed and less than
 # <days> old. No leading zero (Bash would parse it as octal), at most 12
 # digits (no overflow), and a future timestamp (clock skew) counts as stale.
@@ -520,31 +569,23 @@ interval_epoch_within() {
 # INTERVAL_SKIP_REASON, when <name> last succeeded less than <days> ago (and,
 # if given, with the same fingerprint). Days 0 or --force-intervals: never.
 interval_is_fresh() {
-    local name="$1" days="$2" fingerprint="${3-}" file epoch recorded extra
+    local name="$1" days="$2" fingerprint="${3-}" epoch="" recorded="" extra=""
     INTERVAL_SKIP_REASON=""
-    [[ "$FORCE_INTERVALS" != true ]] || return 1
-    (( days > 0 )) || return 1
-    file="$(interval_state_file "$name")"
-    [[ -f "$file" ]] || return 1
-    # Redirect stderr first so an unreadable file stays quiet.
-    IFS=$'\t' read -r epoch recorded extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
+    interval_enabled "$days" || return 1
+    interval_read_state "$name" epoch recorded extra || return 1
     if [[ $# -ge 3 ]]; then
         [[ -n "${recorded:-}" && "$recorded" == "$fingerprint" ]] || return 1
     fi
     interval_epoch_within "$epoch" "$days" || return 1
-    INTERVAL_SKIP_REASON="⏭️ Skipped (last run $(macos_check_format_epoch "$epoch"), next after $(macos_check_format_epoch $(( epoch + days * 86400 ))))"
+    INTERVAL_SKIP_REASON="⏭️ Skipped (last run $(format_epoch "$epoch"), next after $(format_epoch $(( epoch + days * 86400 ))))"
 }
 
 # Format an epoch with the shell builtin; external `date -r` differs between
 # BSD and GNU coreutils.
-macos_check_format_epoch() {
+format_epoch() {
     local label
     printf -v label '%(%Y-%m-%d %H:%M)T' "$1" 2>/dev/null || label="$1"
     printf '%s\n' "$label"
-}
-
-macos_check_state_file() {
-    interval_state_file macos-check
 }
 
 # Current macOS build (e.g. 25A354), or "unknown". Stored with each check so
@@ -559,16 +600,13 @@ macos_check_current_build() {
 # Prints "<epoch> <result>" for a well-formed state file recorded on the
 # current macOS build; fails otherwise.
 macos_check_read_state() {
-    local file epoch result build extra
-    file="$(macos_check_state_file)"
-    [[ -f "$file" ]] || return 1
-    # Redirect stderr first so an unreadable file stays quiet.
-    IFS=$'\t' read -r epoch result build extra 2>/dev/null < "$file" || [[ -n "${epoch:-}" ]] || return 1
+    local epoch="" outcome="" build="" extra=""
+    interval_read_state macos-check epoch outcome build extra || return 1
     interval_epoch_within "$epoch" "$MACOS_CHECK_INTERVAL_DAYS" || return 1
-    [[ "$result" == up-to-date || "$result" == updates-available ]] || return 1
+    [[ "$outcome" == up-to-date || "$outcome" == updates-available ]] || return 1
     # A different (or missing) build means macOS changed since the check.
     [[ -n "${build:-}" && "$build" == "$(macos_check_current_build)" ]] || return 1
-    printf '%s %s\n' "$epoch" "$result"
+    printf '%s %s\n' "$epoch" "$outcome"
 }
 
 macos_check_write_state() {
@@ -581,11 +619,11 @@ check_macos_updates() {
         return
     fi
 
-    if [[ "$FORCE_INTERVALS" != true ]] && (( MACOS_CHECK_INTERVAL_DAYS > 0 )); then
+    if interval_enabled "$MACOS_CHECK_INTERVAL_DAYS"; then
         local state last_epoch last_result last_label
         if state="$(macos_check_read_state)"; then
             read -r last_epoch last_result <<< "$state"
-            last_label="$(macos_check_format_epoch "$last_epoch")"
+            last_label="$(format_epoch "$last_epoch")"
             # Pending updates stay a warning in the summary and receipt.
             if [[ "$last_result" == updates-available ]]; then
                 log_status "macOS Updates" "⚠️ Updates available (cached, checked $last_label; --force-intervals to recheck)"
@@ -632,6 +670,16 @@ macos_tool_components() { printf '%s\n' "macOS Updates"; }
 mise_tool_enabled() { command_exists mise; }
 mise_tool_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
 
+# "Updating global packages (Bun, npm, …)" for the selected managers.
+global_packages_tool_label() {
+    local -A names=([bun]=Bun [npm]=npm [pnpm]=pnpm [pipx]=Pipx [uv]=uv)
+    local pm list=""
+    for pm in bun npm pnpm pipx uv; do
+        global_managers_selected "$pm" && list+="${list:+, }${names[$pm]}"
+    done
+    printf 'Updating global packages%s\n' "${list:+ ($list)}"
+}
+
 global_packages_tool_enabled() { [[ ${#GLOBAL_MANAGERS_SELECTED[@]} -gt 0 ]]; }
 global_packages_tool_components() {
     local pm
@@ -674,7 +722,7 @@ configure_tool_runner() {
         macos_tool_enabled check_macos_updates macos_tool_components
     tool_runner_register "mise" "runtimes" "Updating mise tools (Runtimes)" \
         mise_tool_enabled update_mise_tools mise_tool_components
-    tool_runner_register "global_packages" "phase2" "Updating global packages (Bun, npm, pnpm, Pipx, uv)" \
+    tool_runner_register "global_packages" "phase2" "$(global_packages_tool_label)" \
         global_packages_tool_enabled update_global_packages global_packages_tool_components
     tool_runner_register "custom_commands" "post" "Running custom commands" \
         custom_commands_tool_enabled update_custom_commands custom_commands_tool_components custom_commands_tool_disabled
@@ -710,46 +758,49 @@ list_section_body() {
 # Print a manager section as two lines (header + dim bullet body).
 # Empty items render as "none".
 list_emit() {
-    local label="$1" items="$2"
-    list_section_header "$label"
-    if [[ -z "$items" ]]; then
-        list_section_body "none"
-    else
-        list_section_body "$items"
-    fi
+    list_section_header "$1"
+    list_section_body "${2:-none}"
 }
 
-# Render an associative array (name=version) as a manager line.
-list_emit_assoc() {
-    local label="$1" aname="$2"
-    local -n _items="$aname"
-    local joined
+# Render "name [version...]" lines from stdin as a manager section: whole
+# lines with --versions, names only otherwise.
+list_emit_pairs() {
+    local label="$1" items
     if [[ "$LIST_VERSIONS" == true ]]; then
-        joined="$(for k in "${!_items[@]}"; do printf '%s %s\n' "$k" "${_items[$k]}"; done | sort -u | list_join_commas)"
+        items="$(awk 'NF' | sort -u | list_join_commas)"
     else
-        joined="$(printf '%s\n' "${!_items[@]}" | sort -u | list_join_commas)"
+        items="$(awk 'NF{print $1}' | sort -u | list_join_commas)"
     fi
-    list_emit "$label" "$joined"
+    list_emit "$label" "$items"
+}
+
+# Render an associative array (name=version) as a manager section.
+list_emit_assoc() {
+    local -n _items="$2"
+    local k
+    for k in "${!_items[@]}"; do printf '%s %s\n' "$k" "${_items[$k]}"; done | list_emit_pairs "$1"
+}
+
+# list_require <label> <command>: emit "not installed" and fail when missing.
+list_require() {
+    command_exists "$2" && return 0
+    list_emit "$1" "not installed"
+    return 1
+}
+
+# list_failed <label>: emit "failed" and return 1.
+list_failed() {
+    list_emit "$1" "failed"
+    return 1
 }
 
 list_homebrew_line() {
-    command_exists brew || { list_emit "Homebrew" "not installed"; return 0; }
-    local rc=0 formula_out cask_out
-    if [[ "$LIST_VERSIONS" == true ]]; then
-        formula_out="$(brew list --versions --formula 2>/dev/null)" || rc=1
-        cask_out="$(brew list --versions --cask 2>/dev/null)" || rc=1
-    else
-        formula_out="$(brew list --formula 2>/dev/null)" || rc=1
-        cask_out="$(brew list --cask 2>/dev/null)" || rc=1
-    fi
-    if [[ $rc -ne 0 ]]; then
-        list_emit "Homebrew" "failed"
-        return 1
-    fi
-    local items
-    items="$(printf '%s\n%s\n' "$formula_out" "$cask_out" | awk 'NF' | sort -u | list_join_commas)"
-    list_emit "Homebrew" "$items"
-    return 0
+    list_require Homebrew brew || return 0
+    local versions="" formula_out cask_out
+    [[ "$LIST_VERSIONS" == true ]] && versions=--versions
+    formula_out="$(brew list ${versions:+"$versions"} --formula 2>/dev/null)" || { list_failed Homebrew; return; }
+    cask_out="$(brew list ${versions:+"$versions"} --cask 2>/dev/null)" || { list_failed Homebrew; return; }
+    printf '%s\n%s\n' "$formula_out" "$cask_out" | list_emit_pairs Homebrew
 }
 
 list_macos_line() {
@@ -758,74 +809,35 @@ list_macos_line() {
     else
         list_emit "macOS Software Update" "not installed"
     fi
-    return 0
 }
 
 list_mise_line() {
-    command_exists mise || { list_emit "mise" "not installed"; return 0; }
-    local out rc=0
-    out="$(mise ls --installed --no-header 2>/dev/null)" || rc=1
-    if [[ $rc -ne 0 ]]; then
-        list_emit "mise" "failed"
-        return 1
-    fi
-    local items
-    if [[ "$LIST_VERSIONS" == true ]]; then
-        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^(Plugin|Tool|Name|Package)$/ {print $1, $2}' | sort -u | list_join_commas)"
-    else
-        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^(Plugin|Tool|Name|Package)$/ {print $1}' | sort -u | list_join_commas)"
-    fi
-    list_emit "mise" "$items"
-    return 0
+    list_require mise mise || return 0
+    local out
+    out="$(mise ls --installed --no-header 2>/dev/null)" || { list_failed mise; return; }
+    awk 'NF>=2 && $1!~/^(Plugin|Tool|Name|Package)$/ {print $1, $2}' <<< "$out" | list_emit_pairs mise
 }
 
 list_pipx_line() {
-    command_exists pipx || { list_emit "pipx" "not installed"; return 0; }
-    local out rc=0
-    out="$(pipx list --short 2>/dev/null)" || rc=1
-    if [[ $rc -ne 0 ]]; then
-        list_emit "pipx" "failed"
-        return 1
-    fi
-    local -A versions=()
-    local name ver
-    while IFS=$'\t' read -r name ver; do
-        [[ -n "$name" ]] && versions["$name"]="$ver"
-    done < <(printf '%s\n' "$out" | awk 'NF>=2 && $2~/^[0-9]/ {printf "%s\t%s\n", $1, $2}')
-    list_emit_assoc "pipx" versions
-    return 0
+    list_require pipx pipx || return 0
+    local out
+    out="$(pipx list --short 2>/dev/null)" || { list_failed pipx; return; }
+    awk 'NF>=2 && $2~/^[0-9]/ {print $1, $2}' <<< "$out" | list_emit_pairs pipx
 }
 
-list_npm_line() {
-    command_exists npm || { list_emit "npm" "not installed"; return 0; }
-    local out rc=0
-    out="$(npm list -g --depth=0 2>/dev/null)" || rc=1
-    if [[ $rc -ne 0 ]]; then
-        list_emit "npm" "failed"
-        return 1
-    fi
+# npm and pnpm print the same "pkg@version" global tree.
+list_node_tree_line() {
+    local manager="$1"
+    list_require "$manager" "$manager" || return 0
+    local out
+    out="$("$manager" list -g --depth=0 2>/dev/null)" || { list_failed "$manager"; return; }
     local -A versions=()
     parse_npm_tree versions <<< "$out"
-    list_emit_assoc "npm" versions
-    return 0
-}
-
-list_pnpm_line() {
-    command_exists pnpm || { list_emit "pnpm" "not installed"; return 0; }
-    local out rc=0
-    out="$(pnpm list -g --depth=0 2>/dev/null)" || rc=1
-    if [[ $rc -ne 0 ]]; then
-        list_emit "pnpm" "failed"
-        return 1
-    fi
-    local -A versions=()
-    parse_pnpm_tree versions <<< "$out"
-    list_emit_assoc "pnpm" versions
-    return 0
+    list_emit_assoc "$manager" versions
 }
 
 list_bun_line() {
-    command_exists bun || { list_emit "Bun" "not installed"; return 0; }
+    list_require Bun bun || return 0
     local workdir errfile out err rc=0
     # Mirror the Bun updater: list globals from a fresh temp directory so a
     # local lockfile/project context cannot break or pollute the inventory.
@@ -835,38 +847,23 @@ list_bun_line() {
     err="$(<"$errfile")"
     rm -rf "$workdir" "$errfile"
     if [[ $rc -ne 0 ]]; then
-        # Bun's empty-global state exits 1 with "Lockfile not found" (older
-        # Bun) or "missing lockfile, nothing to list" (newer Bun, e.g. 1.4.0);
-        # treat both as an empty inventory rather than a collector failure.
-        if [[ "$err" == *"Lockfile not found"* || "$err" == *"missing lockfile"* ]]; then
+        if bun_missing_global_lockfile "$err"; then
             list_emit "Bun" "none"
             return 0
         fi
-        list_emit "Bun" "failed"
-        return 1
+        list_failed Bun
+        return
     fi
     local -A versions=()
     parse_bun_tree versions <<< "$out"
     list_emit_assoc "Bun" versions
-    return 0
 }
 
 list_uv_line() {
-    command_exists uv || { list_emit "uv" "not installed"; return 0; }
-    local out rc=0
-    out="$(uv tool list 2>/dev/null)" || rc=1
-    if [[ $rc -ne 0 ]]; then
-        list_emit "uv" "failed"
-        return 1
-    fi
-    local items
-    if [[ "$LIST_VERSIONS" == true ]]; then
-        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^-/ && $2~/^v?[0-9]/ {print $1, $2}' | sort -u | list_join_commas)"
-    else
-        items="$(printf '%s\n' "$out" | awk 'NF>=2 && $1!~/^-/ && $2~/^v?[0-9]/ {print $1}' | sort -u | list_join_commas)"
-    fi
-    list_emit "uv" "$items"
-    return 0
+    list_require uv uv || return 0
+    local out
+    out="$(uv tool list 2>/dev/null)" || { list_failed uv; return; }
+    awk 'NF>=2 && $1!~/^-/ && $2~/^v?[0-9]/ {print $1, $2}' <<< "$out" | list_emit_pairs uv
 }
 
 list_custom_commands_lines() {
@@ -874,18 +871,17 @@ list_custom_commands_lines() {
         list_emit "custom commands" "skipped"
         return 0
     fi
-    if [[ ! -f "$COMMANDS_FILE" ]] || ! custom_commands_has_entries "$COMMANDS_FILE"; then
+    local -a entries=()
+    readarray -t entries < <(custom_commands_entries "$COMMANDS_FILE")
+    if [[ ${#entries[@]} -eq 0 ]]; then
         list_emit "custom commands" "none"
         return 0
     fi
     list_section_header "custom commands"
-    local line trimmed
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        trimmed="$(_custom_commands_trim "$line")"
-        [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
-        list_section_body "$trimmed"
-    done < "$COMMANDS_FILE"
-    return 0
+    local entry
+    for entry in "${entries[@]}"; do
+        list_section_body "$entry"
+    done
 }
 
 run_list() {
@@ -896,8 +892,8 @@ run_list() {
     list_macos_line
     list_mise_line || failures=1
     list_pipx_line || failures=1
-    list_npm_line || failures=1
-    list_pnpm_line || failures=1
+    list_node_tree_line npm || failures=1
+    list_node_tree_line pnpm || failures=1
     list_bun_line || failures=1
     list_uv_line || failures=1
     list_custom_commands_lines
@@ -946,7 +942,7 @@ EOF
 run_doctor_dispatch() {
     # Diagnostic findings are ordinary results, not script aborts.
     LIST_MODE=true
-    local arg lock_pid doctor_python candidate
+    local arg lock_pid doctor_python
     for arg in "$@"; do
         case "$arg" in
             --offline|--verbose) ;;
@@ -969,23 +965,13 @@ EOF
             *) echo "Unknown doctor option: $arg" >&2; return 2 ;;
         esac
     done
-    if [[ -f "$LOCK_FILE" ]]; then
-        lock_pid="$(cat "$LOCK_FILE" 2>/dev/null)"
-        if [[ "$lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            echo "Doctor unavailable: update-all is running (PID: $lock_pid). Retry after it finishes." >&2
-            return 2
-        fi
+    if lock_pid="$(lock_holder_pid)"; then
+        echo "Doctor unavailable: update-all is running (PID: $lock_pid). Retry after it finishes." >&2
+        return 2
     fi
     resolve_global_managers || return 2
     export UPDATE_ALL_ORIGINAL_PATH="$PATH"
-    doctor_python="$(command -v python3 || true)"
-    # Bootstrap without invoking mise shims: those can install or prune tools.
-    if [[ -z "$doctor_python" || "$doctor_python" == */shims/* ]]; then
-        doctor_python=""
-        for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
-            if [[ -x "$candidate" ]]; then doctor_python="$candidate"; break; fi
-        done
-    fi
+    doctor_python="$(find_python || true)"
     setup_environment doctor
     if [[ -z "$doctor_python" ]]; then
         echo "Doctor requires Python 3. Install Python 3 and retry." >&2
@@ -994,9 +980,23 @@ EOF
     "$doctor_python" "$SCRIPT_DIR/lib/doctor.py" doctor "$@"
 }
 
+# Print a python3 that is not a mise shim: shims can install or prune tools.
+find_python() {
+    local candidate
+    candidate="$(command -v python3 2>/dev/null)" || candidate=""
+    if [[ -n "$candidate" && "$candidate" != */shims/* ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+        [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
+
 history_start() {
     [[ "$DRY_RUN" == false ]] || return 0
-    HISTORY_PYTHON="$(command -v python3 || true)"
+    HISTORY_PYTHON="$(find_python || true)"
     if [[ -n "$HISTORY_PYTHON" ]] && "$HISTORY_PYTHON" "$SCRIPT_DIR/lib/doctor.py" start "$REPORT_DIR"; then
         HISTORY_ACTIVE=true
     else
@@ -1059,6 +1059,7 @@ Options:
 Environment:
   UPDATE_ALL_GLOBAL_MANAGERS  Global package managers to update (default:
                               "${GLOBAL_PACKAGES_DEFAULT_MANAGERS[*]}"); empty disables the stage
+  UPDATE_ALL_TOOL_TIMEOUT     Per-command timeout in seconds (default: 3600); 0 disables
   UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS
                               Skip the macOS update check if one succeeded within
                               this many days (0-99999, default: 2); 0 checks every run
@@ -1094,6 +1095,7 @@ EOF
     # 1. SETUP PHASE
     resolve_global_managers || exit 1
     validate_intervals || exit 1
+    validate_tool_timeout || exit 1
     acquire_lock
     REPORT_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_reports.XXXXXX")"
     if [[ ! -d "$REPORT_DIR" ]]; then

@@ -141,6 +141,25 @@ EOF
   [[ "$commands_line" -lt "$summary_line" ]] || fail "summary should follow the command list"
 }
 
+never_enabled() { return 1; }
+after_disabled_run() { : > "$CASE_DIR/after-disabled.done"; }
+no_components() { :; }
+
+test_disabled_tool_without_handler_does_not_abort_serial_phase() {
+  CASE_DIR="$tmp/disabled-no-handler"
+  REPORT_DIR="$CASE_DIR/report"
+  mkdir -p "$REPORT_DIR"
+
+  tool_runner_reset
+  tool_runner_define_phase "serial" "serial"
+  # No disabled handler: must not trip errexit for the rest of the phase.
+  tool_runner_register "missing" "serial" "Missing tool" never_enabled after_disabled_run no_components
+  tool_runner_register "after" "serial" "After tool" phase1_a_enabled after_disabled_run no_components
+
+  tool_runner_execute "$REPORT_DIR" > /dev/null
+  [[ -f "$CASE_DIR/after-disabled.done" ]] || fail "tool after a disabled one did not run"
+}
+
 tmp="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp"
@@ -148,5 +167,6 @@ cleanup() {
 trap cleanup EXIT
 
 test_tool_runner_executes_phases_and_summary_at_boundary
+test_disabled_tool_without_handler_does_not_abort_serial_phase
 
 echo "PASS"

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 
+# shellcheck source=./common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+# Report <component> <status> to the optional status sink.
 _custom_commands_emit_status() {
-    local sink="$1"
-    local component="$2"
-    local status="$3"
-    [[ -n "$sink" ]] || return 0
-    declare -F "$sink" >/dev/null || return 0
-    "$sink" "$component" "$status"
+    call_if_defined "$1" "$2" "$3" || true
 }
 
 _custom_commands_trim() {
@@ -16,19 +15,21 @@ _custom_commands_trim() {
     printf '%s' "$line"
 }
 
-custom_commands_has_entries() {
+# Print each command in the file, trimmed, skipping blank and comment lines.
+custom_commands_entries() {
     local file="$1"
     local line
 
-    [[ -f "$file" ]] || return 1
+    [[ -f "$file" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(_custom_commands_trim "$line")"
-        [[ -z "$line" ]] && continue
-        [[ "$line" == \#* ]] && continue
-        return 0
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        printf '%s\n' "$line"
     done < "$file"
+}
 
-    return 1
+custom_commands_has_entries() {
+    [[ -n "$(custom_commands_entries "$1")" ]]
 }
 
 custom_commands_should_run() {
@@ -51,10 +52,9 @@ custom_commands_handle_disabled() {
     fi
 }
 
+# Default runner: <label> <command line>.
 _custom_commands_run_command() {
-    local _="$1"
-    local line="$2"
-    bash -lc "$line"
+    bash -lc "$2"
 }
 
 custom_commands_run() {
@@ -70,16 +70,10 @@ custom_commands_run() {
     local line label
     local i=0
     local failures=0
-    local exit_code
-    local previous_errexit=0
 
     : > "$idxfile"
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="$(_custom_commands_trim "$line")"
-        [[ -z "$line" ]] && continue
-        [[ "$line" == \#* ]] && continue
-
+    while IFS= read -r line; do
         i=$((i + 1))
         label="command $(printf '%02d' "$i")"
         printf '%s\t%s\n' "$label" "$line" >> "$idxfile"
@@ -90,16 +84,8 @@ custom_commands_run() {
             continue
         fi
 
-        [[ $- == *e* ]] && previous_errexit=1 || previous_errexit=0
-        set +e
-        "$runner_fn" "$label" "$line" < /dev/null
-        exit_code=$?
-        if [[ $previous_errexit -eq 1 ]]; then set -e; else set +e; fi
-
-        if [[ $exit_code -ne 0 ]]; then
-            failures=$((failures + 1))
-        fi
-    done < "$file"
+        "$runner_fn" "$label" "$line" < /dev/null || failures=$((failures + 1))
+    done < <(custom_commands_entries "$file")
 
     if [[ $failures -eq 0 ]]; then
         _custom_commands_emit_status "$status_sink" "custom commands" "✅ Completed ($i)"

@@ -2,7 +2,7 @@
 
 A Bash updater for Homebrew, mise runtimes, npm/pnpm/Bun global packages,
 pipx/uv tools, and commands in `update-all.commands`. macOS updates are listed,
-not installed. Requires Bash 4.3+ (the script finds Homebrew Bash on macOS).
+not installed. Requires Bash 4.4+ (the script finds Homebrew Bash on macOS).
 
 ```sh
 update-all                         # Update installed tools and run custom commands
@@ -23,6 +23,10 @@ Custom commands run at most once every `UPDATE_ALL_COMMANDS_INTERVAL_DAYS` days
 (default 7; 0 runs them every time). A run is recorded only when every command
 succeeds, and editing the commands file triggers a run. `--force-commands`
 runs them now regardless.
+
+Each update command is stopped after `UPDATE_ALL_TOOL_TIMEOUT` seconds
+(default 3600; 0 disables), so a wedged tool cannot hang the run or keep its
+lock. Ctrl-C stops running commands, including parallel stages.
 
 `UPDATE_ALL_GLOBAL_MANAGERS` selects the global package managers to update
 (space-separated, default `pipx npm pnpm bun uv`). Set it to an empty string
@@ -118,4 +122,5 @@ Run the isolated fake-manager suites (no real updates):
 
 ```sh
 for test in tests/*.test.sh; do bash "$test" || break; done
+python3 tests/update-all-timeout.test.py && python3 tests/update-all-interrupt.test.py
 ```

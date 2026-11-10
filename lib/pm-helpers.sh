@@ -3,13 +3,22 @@
 # No dependencies on global script state (REPORT_DIR, log_status, etc.).
 # All functions operate on text in/out — testable with heredocs.
 
-# Colors (set by caller via pm_helpers_set_colors, or defaults)
 _PM_GREEN="${_PM_GREEN:-\033[0;32m}"
 _PM_NC="${_PM_NC:-\033[0m}"
 
-pm_helpers_set_colors() {
-    _PM_GREEN="$1"
-    _PM_NC="$2"
+# Print one "  ↑ name: old → new" line.
+_pm_print_upgrade() {
+    echo -e "${_PM_GREEN}  ↑ $1: $2 → $3${_PM_NC}"
+}
+
+# Store a "name@version" leaf (scoped names keep their leading @).
+_pm_store_leaf() {
+    local -n _leaf_out="$1"
+    local pkg="$2"
+    local name="${pkg%@*}"
+    local version="${pkg##*@}"
+    [[ -z "$name" || "$name" == "$pkg" || -z "$version" ]] && return 0
+    _leaf_out["$name"]="$version"
 }
 
 # --- npm ---
@@ -18,13 +27,9 @@ pm_helpers_set_colors() {
 # Usage: parse_npm_tree <assoc_array_name> < output
 # Populates assoc array with name=version for each package.
 parse_npm_tree() {
-    local -n _out="$1"
-    local pkg name version
+    local pkg
     while IFS= read -r pkg; do
-        name="${pkg%@*}"
-        version="${pkg##*@}"
-        [[ -z "$name" || "$name" == "$pkg" || -z "$version" ]] && continue
-        _out["$name"]="$version"
+        _pm_store_leaf "$1" "$pkg"
     done < <(sed -nE 's/^[[:space:]]*([├└]── |\+-- |`-- )(.+)$/\2/p')
 }
 
@@ -34,15 +39,12 @@ parse_npm_tree() {
 # Usage: parse_bun_tree <assoc_array_name> < output
 # Expects lines like "├── pkg@version" or "└── pkg@version".
 parse_bun_tree() {
-    local -n _out="$1"
-    local line pkg name version
+    local line
+    local -a fields
     while IFS= read -r line; do
         [[ "$line" =~ ^[├└] ]] || continue
-        pkg="$(echo "$line" | awk '{print $NF}')"
-        name="${pkg%@*}"
-        version="${pkg##*@}"
-        [[ -z "$name" || "$name" == "$pkg" || -z "$version" ]] && continue
-        _out["$name"]="$version"
+        read -ra fields <<< "$line"
+        _pm_store_leaf "$1" "${fields[${#fields[@]} - 1]}"
     done
 }
 
@@ -63,12 +65,10 @@ parse_pipx_output() {
     local updated=0
     local line
     while IFS= read -r line; do
-        if [[ "$line" =~ upgraded\ (.+)\ from\ (.+)\ to\ (.+) ]]; then
-            echo -e "${_PM_GREEN}  ↑ ${BASH_REMATCH[1]}: ${BASH_REMATCH[2]} → ${BASH_REMATCH[3]}${_PM_NC}"
-            ((updated++))
-        elif [[ "$line" =~ (.+)\ upgraded\ (.+)\ -\>\ (.+) ]]; then
-            echo -e "${_PM_GREEN}  ↑ ${BASH_REMATCH[1]}: ${BASH_REMATCH[2]} → ${BASH_REMATCH[3]}${_PM_NC}"
-            ((updated++))
+        if [[ "$line" =~ upgraded\ (.+)\ from\ (.+)\ to\ (.+) ]] ||
+            [[ "$line" =~ (.+)\ upgraded\ (.+)\ -\>\ (.+) ]]; then
+            _pm_print_upgrade "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+            updated=$((updated + 1))
         fi
     done
     if [[ $updated -eq 0 ]]; then
@@ -87,13 +87,11 @@ print_version_diff() {
     local -n _old="$1"
     local -n _new="$2"
     local name old_ver new_ver
-    local updated=0
     for name in "${!_old[@]}"; do
         old_ver="${_old[$name]}"
         new_ver="${_new[$name]:-}"
         if [[ -n "$new_ver" && "$old_ver" != "$new_ver" ]]; then
-            echo -e "${_PM_GREEN}  ↑ $name: $old_ver → $new_ver${_PM_NC}"
-            ((updated++))
+            _pm_print_upgrade "$name" "$old_ver" "$new_ver"
         fi
     done
     return 0
@@ -107,11 +105,6 @@ map_to_latest() {
     shift
     local name
     for name in "${!_pkgs[@]}"; do
-        local skip=false
-        local excl
-        for excl in "$@"; do
-            [[ "$name" == "$excl" ]] && { skip=true; break; }
-        done
-        $skip || echo "${name}@latest"
+        [[ " $* " == *" $name "* ]] || echo "${name}@latest"
     done
 }

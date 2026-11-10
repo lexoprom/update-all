@@ -131,11 +131,7 @@ setup_case() {
   local case_dir="$1"
   mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
   cp ./update-all "$case_dir/update-all"
-  cp ./lib/global-packages.sh "$case_dir/lib/global-packages.sh"
-  cp ./lib/custom-commands.sh "$case_dir/lib/custom-commands.sh"
-  cp ./lib/tool-runner.sh "$case_dir/lib/tool-runner.sh"
-  cp ./lib/pm-helpers.sh "$case_dir/lib/pm-helpers.sh"
-  cp ./lib/doctor.py "$case_dir/lib/doctor.py"
+  cp ./lib/*.sh ./lib/doctor.py "$case_dir/lib/"
   chmod +x "$case_dir/update-all"
   make_fake_cmds "$case_dir/bin"
 }
@@ -387,6 +383,44 @@ test_commands_interval_rejects_invalid_value() {
   assert_contains "$out" "UPDATE_ALL_COMMANDS_INTERVAL_DAYS: expected a whole number"
 }
 
+test_global_managers_subset_label() {
+  local case_dir="$tmp/managers-subset-label"
+  setup_case "$case_dir"
+  local out
+  out="$(UPDATE_ALL_GLOBAL_MANAGERS="uv npm" run_case "$case_dir" --dry-run --skip-commands)"
+  assert_contains "$out" "5/5  Updating global packages (npm, uv)"
+}
+
+test_tool_timeout_rejects_invalid_value() {
+  local case_dir="$tmp/timeout-invalid"
+  setup_case "$case_dir"
+  local out
+  out="$(UPDATE_ALL_TOOL_TIMEOUT=1h run_case "$case_dir" --dry-run || true)"
+  assert_contains "$out" "UPDATE_ALL_TOOL_TIMEOUT: expected a whole number of seconds"
+  assert_not_contains "$out" "Would execute"
+}
+
+test_live_lock_blocks_second_run() {
+  local case_dir="$tmp/lock-live"
+  setup_case "$case_dir"
+  # A unique script name gives a private /tmp/.<name>_lock, so the test
+  # cannot collide with a real updater or a parallel test.
+  local name="update-all-locktest-$$" holder out rc=0
+  local lock_file="/tmp/.${name}_lock"
+  cp "$case_dir/update-all" "$case_dir/$name"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$lock_file"
+  out="$(HOME="$case_dir/home" XDG_STATE_HOME="$case_dir/home/.local/state" PATH="$case_dir/bin:/usr/bin:/bin" \
+    "$case_dir/$name" --dry-run --skip-commands 2>&1 | strip_ansi; exit "${PIPESTATUS[0]}")" || rc=$?
+  [[ "$(cat "$lock_file")" == "$holder" ]] || fail "foreign lock was replaced"
+  rm -f "$lock_file"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [[ $rc -ne 0 ]] || fail "second run should fail while the lock is held"
+  assert_contains "$out" "Another instance is already running (PID: $holder)"
+}
+
 trap cleanup EXIT
 
 test_default_commands_file_runs_last
@@ -404,5 +438,8 @@ test_commands_interval_skips_recent_run
 test_commands_interval_force_and_zero
 test_commands_interval_reruns_after_edit_or_failure
 test_commands_interval_rejects_invalid_value
+test_global_managers_subset_label
+test_tool_timeout_rejects_invalid_value
+test_live_lock_blocks_second_run
 
 echo "PASS"

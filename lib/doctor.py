@@ -62,6 +62,10 @@ class Runner:
     def exists(self, name):
         return shutil.which(name, path=self.env.get('PATH', ''))
 
+    @property
+    def shim_dir(self):
+        return Path(self.env.get('MISE_DATA_DIR', str(Path.home() / '.local/share/mise'))) / 'shims'
+
     def prepare_path(self):
         if self.exists('mise'):
             data = self.data('mise', 'env', '--json')
@@ -77,16 +81,14 @@ class Runner:
             args = ['mise', '--dry-run'] + args[1:]
         else:
             executable = self.exists(args[0])
-            shim_dir = Path(self.env.get('MISE_DATA_DIR', str(Path.home() / '.local/share/mise'))) / 'shims'
-            if executable and Path(executable).parent == shim_dir:
+            if executable and Path(executable).parent == self.shim_dir:
                 resolved = self.output('mise', 'which', args[0])
-                if not os.path.isabs(resolved) or Path(resolved).parent == shim_dir:
+                if not os.path.isabs(resolved) or Path(resolved).parent == self.shim_dir:
                     raise CheckError('cannot safely resolve mise shim: ' + args[0])
                 args = [resolved] + args[1:]
         # Do not let /usr/bin/env shebangs invoke mise's auto-cleaning shims.
         child_env = self.env.copy()
-        shim_dir = Path(self.env.get('MISE_DATA_DIR', str(Path.home() / '.local/share/mise'))) / 'shims'
-        child_env['PATH'] = ':'.join(p for p in self.env.get('PATH', '').split(':') if Path(p) != shim_dir)
+        child_env['PATH'] = ':'.join(p for p in self.env.get('PATH', '').split(':') if Path(p) != self.shim_dir)
         if self.verbose:
             print('  $ ' + shlex.join(args), flush=True)
         try:
@@ -147,90 +149,113 @@ def js_packages(data, root):
     return records
 
 
+def _collect_brew(r, manager):
+    records = []
+    prefix = r.output('brew', '--prefix')
+    for kind, directory in (('formula', 'Cellar'), ('cask', 'Caskroom')):
+        output = r.output('brew', 'list', '--versions', '--' + kind)
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                raise CheckError('invalid Homebrew inventory: ' + line)
+            for version in fields[1:]:
+                records.append(package(kind + ':' + fields[0], version,
+                                       str(Path(prefix) / directory / fields[0] / version)))
+    return records
+
+
+def _collect_mise(r, manager):
+    data = r.data('mise', 'ls', '--installed', '--json')
+    return [package(name, item['version'], item['install_path'],
+                    active=item.get('active', False), requested=item.get('requested_version', ''))
+            for name, versions in data.items() for item in versions]
+
+
+def _collect_node(r, manager):
+    """npm and pnpm share the same global list format."""
+    data = r.data(manager, 'list', '-g', '--depth=0', '--json')
+    return js_packages(data, r.output(manager, 'root', '-g'))
+
+
+def _collect_bun(r, manager):
+    with tempfile.TemporaryDirectory(prefix='update-all-bun-') as work:
+        out, err, code = r.run(['bun', 'pm', 'ls', '-g'], accepted=(0, 1), cwd=work)
+    if code and ('Lockfile not found' in err or 'missing lockfile' in err):
+        return []  # No global lockfile: nothing installed globally yet.
+    if code:
+        raise CheckError(err or out or 'bun inventory failed')
+    records = []
+    root = ''
+    for line in out.splitlines():
+        if line.startswith('/'):
+            root = line.strip().split(' node_modules')[0]
+            if not root.endswith('/node_modules'):
+                root += '/node_modules'
+        match = re.match(r'^[├└]── (.+)@([^@\s]+)\s*$', line)
+        if match:
+            if not root:
+                raise CheckError('missing Bun global installation path')
+            name, version = match.groups()
+            records.append(package(name, version, str(Path(root) / name)))
+        elif line.startswith(('├', '└')):
+            raise CheckError('unrecognized Bun package: ' + line)
+    if not root and out.strip():
+        raise CheckError('unrecognized Bun inventory')
+    return records
+
+
+def _collect_pipx(r, manager):
+    records = []
+    data = r.data('pipx', 'list', '--json', '--skip-maintenance')
+    for name, venv in data['venvs'].items():
+        metadata = venv['metadata']
+        main = metadata['main_package']
+        paths = [path_value(p) for p in main.get('app_paths', [])]
+        if main.get('include_dependencies', False):
+            for values in main.get('app_paths_of_dependencies', {}).values():
+                paths.extend(path_value(p) for p in values)
+        location = str(Path(paths[0]).parent.parent) if paths else ''
+        records.append(package(name, main['package_version'], location,
+                               apps=paths if metadata.get('exposure_enabled', True) else [],
+                               suffix=main.get('suffix', '') or '',
+                               pinned=main.get('pinned', False), requested=main.get('package_or_url', '')))
+    return records
+
+
+def _collect_uv(r, manager):
+    records = []
+    out = r.output('uv', 'tool', 'list', '--show-paths', '--show-version-specifiers')
+    current = None
+    for line in out.splitlines():
+        match = re.match(r'^([^\s]+) v([^\s]+).*\((/.*)\)$', line)
+        app = re.match(r'^- \S+ \((/.*)\)$', line)
+        if match:
+            current = package(*match.groups(), apps=[])
+            spec = re.search(r'\[required: (.*?)\]', line)
+            current['requested'] = spec.group(1) if spec else ''
+            records.append(current)
+        elif app and current is not None:
+            current['apps'].append(app.group(1))
+        elif line.strip():
+            raise CheckError('unrecognized uv inventory: ' + line)
+    return records
+
+
+COLLECTORS = dict(brew=_collect_brew, mise=_collect_mise, npm=_collect_node, pnpm=_collect_node,
+                  bun=_collect_bun, pipx=_collect_pipx, uv=_collect_uv)
+
+
 def collect(runner, manager):
     """Failure is never an empty inventory. Shared by doctor and history."""
-    r = runner
-    if not r.exists(manager):
+    if manager not in COLLECTORS:
+        return dict(status='error', packages=[], error='unsupported manager: ' + manager)
+    if not runner.exists(manager):
         return dict(status='absent', packages=[])
     try:
-        records = []
-        if manager == 'brew':
-            prefix = r.output('brew', '--prefix')
-            for kind, directory in (('formula', 'Cellar'), ('cask', 'Caskroom')):
-                output = r.output('brew', 'list', '--versions', '--' + kind)
-                for line in output.splitlines():
-                    fields = line.split()
-                    if len(fields) < 2:
-                        raise CheckError('invalid Homebrew inventory: ' + line)
-                    for version in fields[1:]:
-                        records.append(package(kind + ':' + fields[0], version,
-                                               str(Path(prefix) / directory / fields[0] / version)))
-        elif manager == 'mise':
-            data = r.data('mise', 'ls', '--installed', '--json')
-            for name, versions in data.items():
-                for item in versions:
-                    records.append(package(name, item['version'], item['install_path'],
-                                           active=item.get('active', False),
-                                           requested=item.get('requested_version', '')))
-        elif manager in ('npm', 'pnpm'):
-            data = r.data(manager, 'list', '-g', '--depth=0', '--json')
-            root = r.output(manager, 'root', '-g')
-            records = js_packages(data, root)
-        elif manager == 'bun':
-            with tempfile.TemporaryDirectory(prefix='update-all-bun-') as work:
-                out, err, code = r.run(['bun', 'pm', 'ls', '-g'], accepted=(0, 1), cwd=work)
-            if code and ('Lockfile not found' in err or 'missing lockfile' in err):
-                return dict(status='ok', packages=[], executable=r.exists(manager))
-            if code:
-                raise CheckError(err or out or 'bun inventory failed')
-            root = ''
-            for line in out.splitlines():
-                if line.startswith('/'):
-                    root = line.strip().split(' node_modules')[0]
-                    if not root.endswith('/node_modules'):
-                        root += '/node_modules'
-                match = re.match(r'^[├└]── (.+)@([^@\s]+)\s*$', line)
-                if match:
-                    if not root:
-                        raise CheckError('missing Bun global installation path')
-                    name, version = match.groups()
-                    records.append(package(name, version, str(Path(root) / name)))
-                elif line.startswith(('├', '└')):
-                    raise CheckError('unrecognized Bun package: ' + line)
-            if not root and out.strip():
-                raise CheckError('unrecognized Bun inventory')
-        elif manager == 'pipx':
-            data = r.data('pipx', 'list', '--json', '--skip-maintenance')
-            for name, venv in data['venvs'].items():
-                metadata = venv['metadata']
-                main = metadata['main_package']
-                paths = [path_value(p) for p in main.get('app_paths', [])]
-                if main.get('include_dependencies', False):
-                    for values in main.get('app_paths_of_dependencies', {}).values():
-                        paths.extend(path_value(p) for p in values)
-                location = str(Path(paths[0]).parent.parent) if paths else ''
-                records.append(package(name, main['package_version'], location,
-                                       apps=paths if metadata.get('exposure_enabled', True) else [],
-                                       suffix=main.get('suffix', '') or '',
-                                       pinned=main.get('pinned', False), requested=main.get('package_or_url', '')))
-        elif manager == 'uv':
-            out = r.output('uv', 'tool', 'list', '--show-paths', '--show-version-specifiers')
-            current = None
-            for line in out.splitlines():
-                match = re.match(r'^([^\s]+) v([^\s]+).*\((/.*)\)$', line)
-                app = re.match(r'^- \S+ \((/.*)\)$', line)
-                if match:
-                    current = package(*match.groups(), apps=[])
-                    spec = re.search(r'\[required: (.*?)\]', line)
-                    current['requested'] = spec.group(1) if spec else ''
-                    records.append(current)
-                elif app and current is not None:
-                    current['apps'].append(app.group(1))
-                elif line.strip():
-                    raise CheckError('unrecognized uv inventory: ' + line)
-        return dict(status='ok', packages=records, executable=r.exists(manager))
+        records = COLLECTORS[manager](runner, manager)
+        return dict(status='ok', packages=records, executable=runner.exists(manager))
     except (CheckError, KeyError, TypeError, AttributeError, ValueError) as exc:
-        return dict(status='error', packages=[], error=str(exc), executable=r.exists(manager))
+        return dict(status='error', packages=[], error=str(exc), executable=runner.exists(manager))
 
 
 def state_path():
@@ -331,6 +356,13 @@ def history(action, report):
         atomic_write(path, data)
 
 
+def lost_packages(old, new):
+    """Names in a complete old inventory that a complete (or absent) new one lacks."""
+    if old.get('status') != 'ok' or new.get('status') not in ('ok', 'absent'):
+        return []
+    return sorted({p['name'] for p in old['packages']} - {p['name'] for p in new['packages']})
+
+
 class Doctor:
     def __init__(self, runner, offline=False, original_path=None):
         self.r = runner
@@ -388,50 +420,56 @@ class Doctor:
             if location and not Path(location).exists():
                 self.emit('ERROR', manager + ': missing installation ' + item['name'], location,
                           'Reinstall this package with ' + manager + ' after reviewing its version constraint.')
-                continue
-            if manager in ('npm', 'pnpm', 'bun'):
-                manifest = Path(location) / 'package.json'
-                try:
-                    data = json.loads(manifest.read_text())
-                    if data.get('version') != item['version']:
-                        self.emit('ERROR', manager + ': installed version differs from inventory: ' + item['name'],
-                                  '{} reports {}; manifest contains {}'.format(manager, item['version'], data.get('version')),
-                                  'Review and reinstall this package with ' + manager + '.')
-                    bins = data.get('bin', {})
-                    if isinstance(bins, str):
-                        bins = {item['name'].split('/')[-1]: bins}
-                    for name, target in bins.items():
-                        self.commands.add(name)
-                        target = Path(location) / target
-                        if not target.is_file():
-                            self.emit('ERROR', manager + ': missing executable ' + name, str(target),
-                                      'Reinstall ' + item['name'] + ' with ' + manager + '.')
-                        self.check_exposure(manager, name, target)
-                except (OSError, ValueError, TypeError, AttributeError) as exc:
-                    self.emit('ERROR', manager + ': unreadable package manifest ' + item['name'], str(exc),
-                              'Reinstall this package with ' + manager + '.')
+            elif manager in ('npm', 'pnpm', 'bun'):
+                self.inspect_node_package(manager, item, location)
             elif manager in ('pipx', 'uv'):
-                for app in item.get('apps', []):
-                    target = Path(app)
-                    name = target.name + (item.get('suffix', '') if manager == 'pipx' else '')
-                    self.commands.add(name)
-                    if not target.is_file() or not os.access(target, os.X_OK):
-                        self.emit('ERROR', manager + ': broken executable ' + name, str(target),
-                                  'Reinstall ' + item['name'] + ' with ' + manager + '.')
-                    self.check_exposure(manager, name, target)
-                if location:
-                    python = Path(location) / 'bin/python'
-                    if not python.is_file():
-                        self.emit('ERROR', manager + ': broken Python environment ' + item['name'], str(python),
-                                  'Reinstall ' + item['name'] + ' with ' + manager + '.')
-                    elif self.r.exists('uv'):
-                        self.check(manager + ': dependencies of ' + item['name'],
-                                   ['uv', 'pip', 'check', '--python', str(python), '--no-python-downloads'],
-                                   failure='ERROR')
-                    else:
-                        # runpip can provision pip; invoking an existing interpreter cannot.
-                        self.check('pipx: dependencies of ' + item['name'],
-                                   [str(python), '-m', 'pip', 'check'], failure='WARN')
+                self.inspect_python_tool(manager, item, location)
+
+    def inspect_node_package(self, manager, item, location):
+        manifest = Path(location) / 'package.json'
+        try:
+            data = json.loads(manifest.read_text())
+            if data.get('version') != item['version']:
+                self.emit('ERROR', manager + ': installed version differs from inventory: ' + item['name'],
+                          '{} reports {}; manifest contains {}'.format(manager, item['version'], data.get('version')),
+                          'Review and reinstall this package with ' + manager + '.')
+            bins = data.get('bin', {})
+            if isinstance(bins, str):
+                bins = {item['name'].split('/')[-1]: bins}
+            for name, target in bins.items():
+                self.commands.add(name)
+                target = Path(location) / target
+                if not target.is_file():
+                    self.emit('ERROR', manager + ': missing executable ' + name, str(target),
+                              'Reinstall ' + item['name'] + ' with ' + manager + '.')
+                self.check_exposure(manager, name, target)
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            self.emit('ERROR', manager + ': unreadable package manifest ' + item['name'], str(exc),
+                      'Reinstall this package with ' + manager + '.')
+
+    def inspect_python_tool(self, manager, item, location):
+        for app in item.get('apps', []):
+            target = Path(app)
+            name = target.name + (item.get('suffix', '') if manager == 'pipx' else '')
+            self.commands.add(name)
+            if not target.is_file() or not os.access(target, os.X_OK):
+                self.emit('ERROR', manager + ': broken executable ' + name, str(target),
+                          'Reinstall ' + item['name'] + ' with ' + manager + '.')
+            self.check_exposure(manager, name, target)
+        if not location:
+            return
+        python = Path(location) / 'bin/python'
+        if not python.is_file():
+            self.emit('ERROR', manager + ': broken Python environment ' + item['name'], str(python),
+                      'Reinstall ' + item['name'] + ' with ' + manager + '.')
+        elif self.r.exists('uv'):
+            self.check(manager + ': dependencies of ' + item['name'],
+                       ['uv', 'pip', 'check', '--python', str(python), '--no-python-downloads'],
+                       failure='ERROR')
+        else:
+            # runpip can provision pip; invoking an existing interpreter cannot.
+            self.check('pipx: dependencies of ' + item['name'],
+                       [str(python), '-m', 'pip', 'check'], failure='WARN')
 
     def check_exposure(self, manager, name, target):
         active = shutil.which(name, path=self.r.env.get('PATH', ''))
@@ -447,8 +485,7 @@ class Doctor:
         if not path:
             return None
         # Resolve shims through mise without executing arbitrary user commands.
-        shim_dir = Path(self.r.env.get('MISE_DATA_DIR', str(Path.home() / '.local/share/mise'))) / 'shims'
-        if Path(path).parent == shim_dir:
+        if Path(path).parent == self.r.shim_dir:
             if name not in self.shim_targets:
                 try:
                     self.shim_targets[name] = os.path.realpath(self.r.output('mise', 'which', name))
@@ -506,104 +543,118 @@ class Doctor:
                     self.emit('INFO', 'Duplicate package: ' + name, ', '.join(sorted(managers)),
                               'Review ownership; duplicate installations can be intentional.')
 
+    # Remaining-update check per manager.
+    ONLINE = dict(brew='_online_brew', mise='_online_mise', npm='_online_node', pnpm='_online_node',
+                  bun='_online_bun', pipx='_online_pipx', uv='_online_uv')
+
     def online(self, manager):
         if self.offline:
             self.emit('SKIP', manager + ': online updates (--offline)')
             return
         try:
-            if manager == 'brew':
-                if not self.check('Homebrew metadata refresh', ['brew', 'update'], advice='Retry brew update.'):
-                    self.emit('WARN', 'Homebrew freshness is unknown; metadata refresh failed')
-                    return
-                data = self.r.data('brew', 'outdated', '--json=v2', '--greedy-auto-updates')
-                entries = data['formulae'] + data['casks']
-                casks = {id(entry) for entry in data['casks']}
-                pinned = set(self.r.output('brew', 'list', '--pinned').splitlines())
-                for entry in entries:
-                    name = entry.get('name') or entry['token']
-                    pin = entry.get('pinned', False) or name in pinned
-                    # update-all upgrades auto_updates casks only every few days
-                    # (UPDATE_ALL_CASKS_INTERVAL_DAYS); --force-intervals runs it now.
-                    run = 'Run update-all --force-intervals' if id(entry) in casks else 'Run update-all'
-                    self.emit('INFO' if pin else 'WARN', 'brew: ' + name + (' is pinned' if pin else ' has an update'),
-                              '{} -> {}'.format(entry.get('installed_versions', entry.get('installed', '?')),
-                                                entry.get('current_version', '?')),
-                              '' if pin else run + ', or review brew upgrade --greedy-auto-updates ' + shlex.quote(name))
-                if not entries:
-                    self.emit('OK', 'brew: no remaining updates')
-            elif manager == 'mise':
-                data = self.r.data('mise', 'outdated', '--json')
-                for name, item in data.items():
-                    self.emit('WARN', 'mise: update available for ' + name,
-                              '{} -> {} (requested: {})'.format(item.get('current'), item.get('latest'), item.get('requested')),
-                              'Run mise upgrade --yes (respects configured constraints).')
-                if not data:
-                    self.emit('OK', 'mise: configured versions are up to date')
-            elif manager in ('npm', 'pnpm'):
-                out, err, code = self.r.run([manager, 'outdated', '-g', '--json'], accepted=(0, 1))
-                data = json.loads(out)
-                if not isinstance(data, dict) or 'error' in data or (code and not data):
-                    raise CheckError(err or out or 'outdated check failed')
-                for name, item in data.items():
-                    delegated = manager == 'pnpm' and name in ('pnpm', '@pnpm/exe')
-                    self.emit('INFO' if delegated else 'WARN', manager + ': update available for ' + name,
-                              '{} -> {}'.format(item.get('current'), item.get('latest')),
-                              'Managed separately by the pnpm self-update command; review its version tag.' if delegated else 'Run update-all.')
-                if not data:
-                    self.emit('OK', manager + ': no remaining updates')
-            elif manager == 'bun':
-                with tempfile.TemporaryDirectory(prefix='update-all-bun-') as work:
-                    out, err, code = self.r.run(['bun', 'outdated', '-g', '--no-save'], cwd=work)
-                rows = [line for line in out.splitlines() if re.search(r'[│|].*[│|]', line)
-                        and not re.search(r'Package\s*[│|]', line)]
-                if rows:
-                    self.emit('WARN', 'bun: updates available', out, 'Run update-all.')
-                elif not out.strip() or 'up to date' in out.lower():
-                    self.emit('OK', 'bun: no remaining updates')
-                else:
-                    self.emit('WARN', 'bun: could not interpret outdated result', out + '\n' + err,
-                              'Review bun outdated -g --no-save.')
-            elif manager == 'pipx':
-                out = self.r.output('pipx', 'list', '--outdated', '--skip-maintenance')
-                pins = {p['name'] for p in self.inventories[manager]['packages']
-                        if p.get('pinned') or re.search(r'[<>=!~@/]', p.get('requested', ''))}
-                found = False
-                for line in out.splitlines():
-                    if not line.strip():
-                        continue
-                    if line == 'pipx found no available upgrades.':
-                        continue
-                    if line == 'pipx found no index packages to check.':
-                        self.emit('INFO', 'pipx: no index packages to check; source installs were not checked')
-                        found = True
-                        continue
-                    match = re.match(r'^(\S+?)( \[pinned\])?: (\S+) -> (\S+)$', line)
-                    if not match:
-                        raise CheckError('unrecognized pipx outdated result: ' + line)
-                    name, pinned, _, _ = match.groups()
-                    found = True
-                    self.emit('INFO' if name in pins or pinned else 'WARN', 'pipx: ' + line,
-                              advice='' if name in pins or pinned else 'Run update-all.')
-                if not found:
-                    self.emit('OK', 'pipx: no remaining updates')
-            elif manager == 'uv':
-                out = self.r.output('uv', 'tool', 'list', '--outdated')
-                updates = [line for line in out.splitlines() if 'latest:' in line]
-                if updates:
-                    constrained = {p['name']: p.get('requested') for p in self.inventories[manager]['packages']
-                                   if p.get('requested')}
-                    for line in updates:
-                        name = line.split()[0]
-                        self.emit('INFO' if name in constrained else 'WARN', 'uv: ' + line,
-                                  'Required: ' + constrained[name] if name in constrained else '',
-                                  'Review the saved constraint before changing versions.' if name in constrained else 'Run update-all.')
-                elif not out:
-                    self.emit('OK', 'uv: no remaining updates')
-                else:
-                    raise CheckError('unrecognized uv outdated result: ' + out)
+            if manager not in self.ONLINE:
+                raise CheckError('no update check for manager: ' + manager)
+            getattr(self, self.ONLINE[manager])(manager)
         except (CheckError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self.emit('WARN', manager + ': freshness check incomplete', str(exc),
                       'Retry update-all doctor --verbose; check network and manager support.')
+
+    def _online_brew(self, manager):
+        if not self.check('Homebrew metadata refresh', ['brew', 'update'], advice='Retry brew update.'):
+            self.emit('WARN', 'Homebrew freshness is unknown; metadata refresh failed')
+            return
+        data = self.r.data('brew', 'outdated', '--json=v2', '--greedy-auto-updates')
+        entries = data['formulae'] + data['casks']
+        casks = {id(entry) for entry in data['casks']}
+        pinned = set(self.r.output('brew', 'list', '--pinned').splitlines())
+        for entry in entries:
+            name = entry.get('name') or entry['token']
+            pin = entry.get('pinned', False) or name in pinned
+            # update-all upgrades auto_updates casks only every few days
+            # (UPDATE_ALL_CASKS_INTERVAL_DAYS); --force-intervals runs it now.
+            run = 'Run update-all --force-intervals' if id(entry) in casks else 'Run update-all'
+            self.emit('INFO' if pin else 'WARN', 'brew: ' + name + (' is pinned' if pin else ' has an update'),
+                      '{} -> {}'.format(entry.get('installed_versions', entry.get('installed', '?')),
+                                        entry.get('current_version', '?')),
+                      '' if pin else run + ', or review brew upgrade --greedy-auto-updates ' + shlex.quote(name))
+        if not entries:
+            self.emit('OK', 'brew: no remaining updates')
+
+    def _online_mise(self, manager):
+        data = self.r.data('mise', 'outdated', '--json')
+        for name, item in data.items():
+            self.emit('WARN', 'mise: update available for ' + name,
+                      '{} -> {} (requested: {})'.format(item.get('current'), item.get('latest'), item.get('requested')),
+                      'Run mise upgrade --yes (respects configured constraints).')
+        if not data:
+            self.emit('OK', 'mise: configured versions are up to date')
+
+    def _online_node(self, manager):
+        # npm and pnpm share the same outdated format.
+        out, err, code = self.r.run([manager, 'outdated', '-g', '--json'], accepted=(0, 1))
+        data = json.loads(out)
+        if not isinstance(data, dict) or 'error' in data or (code and not data):
+            raise CheckError(err or out or 'outdated check failed')
+        for name, item in data.items():
+            delegated = manager == 'pnpm' and name in ('pnpm', '@pnpm/exe')
+            self.emit('INFO' if delegated else 'WARN', manager + ': update available for ' + name,
+                      '{} -> {}'.format(item.get('current'), item.get('latest')),
+                      'Managed separately by the pnpm self-update command; review its version tag.' if delegated else 'Run update-all.')
+        if not data:
+            self.emit('OK', manager + ': no remaining updates')
+
+    def _online_bun(self, manager):
+        with tempfile.TemporaryDirectory(prefix='update-all-bun-') as work:
+            out, err, code = self.r.run(['bun', 'outdated', '-g', '--no-save'], cwd=work)
+        rows = [line for line in out.splitlines() if re.search(r'[│|].*[│|]', line)
+                and not re.search(r'Package\s*[│|]', line)]
+        if rows:
+            self.emit('WARN', 'bun: updates available', out, 'Run update-all.')
+        elif not out.strip() or 'up to date' in out.lower():
+            self.emit('OK', 'bun: no remaining updates')
+        else:
+            self.emit('WARN', 'bun: could not interpret outdated result', out + '\n' + err,
+                      'Review bun outdated -g --no-save.')
+
+    def _online_pipx(self, manager):
+        out = self.r.output('pipx', 'list', '--outdated', '--skip-maintenance')
+        pins = {p['name'] for p in self.inventories[manager]['packages']
+                if p.get('pinned') or re.search(r'[<>=!~@/]', p.get('requested', ''))}
+        found = False
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            if line == 'pipx found no available upgrades.':
+                continue
+            if line == 'pipx found no index packages to check.':
+                self.emit('INFO', 'pipx: no index packages to check; source installs were not checked')
+                found = True
+                continue
+            match = re.match(r'^(\S+?)( \[pinned\])?: (\S+) -> (\S+)$', line)
+            if not match:
+                raise CheckError('unrecognized pipx outdated result: ' + line)
+            name, pinned, _, _ = match.groups()
+            found = True
+            self.emit('INFO' if name in pins or pinned else 'WARN', 'pipx: ' + line,
+                      advice='' if name in pins or pinned else 'Run update-all.')
+        if not found:
+            self.emit('OK', 'pipx: no remaining updates')
+
+    def _online_uv(self, manager):
+        out = self.r.output('uv', 'tool', 'list', '--outdated')
+        updates = [line for line in out.splitlines() if 'latest:' in line]
+        if updates:
+            constrained = {p['name']: p.get('requested') for p in self.inventories[manager]['packages']
+                           if p.get('requested')}
+            for line in updates:
+                name = line.split()[0]
+                self.emit('INFO' if name in constrained else 'WARN', 'uv: ' + line,
+                          'Required: ' + constrained[name] if name in constrained else '',
+                          'Review the saved constraint before changing versions.' if name in constrained else 'Run update-all.')
+        elif not out:
+            self.emit('OK', 'uv: no remaining updates')
+        else:
+            raise CheckError('unrecognized uv outdated result: ' + out)
 
     def receipt(self):
         path = state_path()
@@ -634,18 +685,12 @@ class Doctor:
                     self.emit('WARN', manager + ': saved inventory is incomplete')
                 if data['state'] == 'completed' and (not before or not after):
                     self.emit('WARN', manager + ': saved inventory is missing')
-                if before.get('status') == 'ok' and after.get('status') in ('ok', 'absent'):
-                    old = {p['name'] for p in before['packages']}
-                    new = {p['name'] for p in after['packages']}
-                    for name in sorted(old - new):
-                        self.emit('ERROR', manager + ': disappeared during last update: ' + name,
-                                  advice='Review the old runtime/prefix and reinstall the package if still needed.')
-                if after.get('status') == 'ok' and current.get('status') in ('ok', 'absent'):
-                    old = {p['name'] for p in after['packages']}
-                    new = {p['name'] for p in current['packages']}
-                    for name in sorted(old - new):
-                        self.emit('WARN', manager + ': removed since last update: ' + name,
-                                  'This may be an intentional later change.')
+                for name in lost_packages(before, after):
+                    self.emit('ERROR', manager + ': disappeared during last update: ' + name,
+                              advice='Review the old runtime/prefix and reinstall the package if still needed.')
+                for name in lost_packages(after, current):
+                    self.emit('WARN', manager + ': removed since last update: ' + name,
+                              'This may be an intentional later change.')
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self.emit('WARN', 'Update history is unreadable', str(exc), 'Run update-all to create a new receipt.')
 
@@ -694,7 +739,7 @@ class Doctor:
                 text = out + '\n' + err
                 if 'No new software available' in text:
                     self.emit('OK', 'macOS: up to date')
-                elif '* Label:' in text or '* ' in text:
+                elif '* ' in text:
                     self.emit('INFO', 'macOS updates available', text,
                               'Open System Settings > General > Software Update. update-all does not install these.')
                 else:
