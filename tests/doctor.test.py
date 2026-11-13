@@ -394,6 +394,30 @@ class DoctorTests(unittest.TestCase):
                     d.history(action, 'run')
                 self.assertEqual(d.state_path().read_bytes(), newer[0])
 
+    def test_finish_prints_version_changes(self):
+        def inv(*items):
+            return dict(status='ok', packages=[dict(name=n, version=v, location='') for n, v in items])
+        before = dict(brew=inv(('formula:git', '2.1'), ('cask:firefox', '1'), ('formula:old', '1')),
+                      mise=inv(('node', '20.1'), ('node', '22.1')), npm=inv(('a', '1')),
+                      uv=dict(status='error', packages=[]))
+        after = dict(brew=inv(('formula:git', '2.2'), ('cask:firefox', '1'), ('formula:new', '3')),
+                     mise=inv(('node', '20.1'), ('node', '22.2')), npm=inv(('a', '1')), uv=inv(('x', '1')))
+        self.assertEqual(d.version_changes(before, after), [
+            ('brew', 'formula:git', ['2.1'], ['2.2']), ('brew', 'formula:new', [], ['3']),
+            ('brew', 'formula:old', ['1'], []), ('mise', 'node', ['22.1'], ['22.2'])])
+        stream = io.StringIO()
+        d.print_changes(d.version_changes(before, after), stream)
+        text = stream.getvalue()
+        self.assertRegex(text, r'brew +git +2\.1 → 2\.2')
+        self.assertRegex(text, r'brew +new +\+ 3')
+        self.assertRegex(text, r'brew +old +− 1')
+        self.assertRegex(text, r'mise +node +22\.1 → 22\.2')
+        self.assertNotIn('firefox', text)
+        self.assertNotIn('\033', text)
+        stream = io.StringIO()
+        d.print_changes([], stream)
+        self.assertIn('No package versions changed', stream.getvalue())
+
     def test_receipt_writes_hold_exclusive_lock(self):
         original_write = d.atomic_write
         writes = []

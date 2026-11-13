@@ -354,6 +354,54 @@ def history(action, report):
         if json.loads(path.read_text()).get('run_id') != report:
             return  # Ownership may have changed during snapshot collection.
         atomic_write(path, data)
+    if action == 'finish':
+        print_changes(version_changes(data['before'], data['after']))
+
+
+def version_changes(before, after):
+    """(manager, name, old versions, new versions) for packages whose version set changed.
+
+    Managers without a complete inventory on both sides are left out: a failed
+    snapshot is not proof that packages were installed or removed.
+    """
+    changes = []
+    for manager in MANAGERS:
+        old, new = before.get(manager, {}), after.get(manager, {})
+        if old.get('status') != 'ok' or new.get('status') != 'ok':
+            continue
+        versions = collections.defaultdict(lambda: (set(), set()))
+        for side, inventory in ((0, old), (1, new)):
+            for item in inventory['packages']:
+                versions[item['name']][side].add(item['version'])
+        for name in sorted(versions):
+            was, now_ = versions[name]
+            if was != now_:
+                changes.append((manager, name, sorted(was - now_), sorted(now_ - was)))
+    return changes
+
+
+def print_changes(changes, stream=None):
+    stream = stream or sys.stdout
+    color = stream.isatty() and not os.environ.get('NO_COLOR')
+    bold, dim, green, red, nc = (('\033[1m', '\033[2m', '\033[0;32m', '\033[0;31m', '\033[0m')
+                                 if color else ('',) * 5)
+    rule = dim + '─' * 44 + nc
+    print('\n' + bold + 'Changes' + nc, file=stream)
+    print(rule, file=stream)
+    if not changes:
+        print('  ' + dim + 'No package versions changed' + nc, file=stream)
+    for manager, name, removed, added in changes:
+        name, removed, added = clean(name), [clean(v) for v in removed], [clean(v) for v in added]
+        kind, sep, short = name.partition(':')
+        label = (short + ' (cask)' if kind == 'cask' else short) if sep and manager == 'brew' else name
+        if removed and added:
+            detail = ', '.join(removed) + ' → ' + green + ', '.join(added) + nc
+        elif added:
+            detail = green + '+ ' + ', '.join(added) + nc
+        else:
+            detail = red + '− ' + ', '.join(removed) + nc
+        print('  {}{:<6}{} {:<28} {}'.format(dim, manager, nc, label, detail), file=stream)
+    print(rule, file=stream)
 
 
 def lost_packages(old, new):

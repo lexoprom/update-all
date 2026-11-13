@@ -110,6 +110,11 @@ and after updating, including package versions and installation paths. It does
 not contain custom-command text or raw command logs. Only the latest run is kept.
 If Python is missing or storage fails, updates continue with a warning.
 
+After a real run, a `Changes` section lists every package whose version changed
+between the two inventories (`git  2.51.0 → 2.52.0`), plus installed (`+`) and
+removed (`−`) versions. Managers whose inventory failed on either side are left
+out rather than reported as changed.
+
 Doctor distinguishes packages lost during an update from removals made later.
 Missing or invalid snapshots are not interpreted as empty installations.
 Interrupted runs remain marked unfinished. Existing installations without a
