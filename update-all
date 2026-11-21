@@ -256,8 +256,14 @@ safe_execute_retry() {
     local description="$3"
     shift 3
 
+    # Show wrapper functions as the command they wrap.
+    local shown_cmd="$*"
+    if [[ "$1" == brew_upgrade_recovering ]]; then
+        shown_cmd="brew upgrade${2:+ ${*:2}}"
+    fi
+
     if [[ "$DRY_RUN" = true ]]; then
-        printf '  %b↳%b  Would execute: %s\n' "$CYAN" "$NC" "$*"
+        printf '  %b↳%b  Would execute: %s\n' "$CYAN" "$NC" "$shown_cmd"
         log_status "$description" "🔍 Dry run"
         return 0
     fi
@@ -266,9 +272,9 @@ safe_execute_retry() {
     while :; do
         if [[ "$VERBOSE" = true ]]; then
             if (( max_attempts > 1 )); then
-                printf '  %b↳%b  Executing (attempt %d/%d): %s\n' "$CYAN" "$NC" "$attempt" "$max_attempts" "$*"
+                printf '  %b↳%b  Executing (attempt %d/%d): %s\n' "$CYAN" "$NC" "$attempt" "$max_attempts" "$shown_cmd"
             else
-                printf '  %b↳%b  Executing: %s\n' "$CYAN" "$NC" "$*"
+                printf '  %b↳%b  Executing: %s\n' "$CYAN" "$NC" "$shown_cmd"
             fi
         fi
 
@@ -302,7 +308,7 @@ safe_execute_retry() {
     if [[ $exit_code -eq 124 ]]; then
         printf '     %bTimed out after %ss%b\n' "$DIM" "$TOOL_TIMEOUT_SECONDS" "$NC"
     fi
-    printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$*"
+    printf '     %bCommand:%b %s\n' "$DIM" "$NC" "$shown_cmd"
     if [[ -n "$output" ]]; then
         while IFS= read -r line; do
             printf '     %s\n' "$line"
@@ -364,10 +370,31 @@ acquire_lock() {
 
 # --- UPDATE FUNCTIONS ---
 
+# A cask upgrade that dies mid-way can leave the old app bundle in its
+# Caskroom version dir; every later upgrade then aborts with "It seems there
+# is already an App at '<caskroom>/<cask>/<version>/X.app'". The live app is
+# still in /Applications, so move the stale copy to the Trash and retry once.
+# Usage: brew_upgrade_recovering [brew upgrade args...]
+brew_upgrade_recovering() {
+    local output rc=0 caskroom path recovered=false
+    output=$(brew upgrade "$@" 2>&1) || rc=$?
+    printf '%s\n' "$output"
+    (( rc == 0 )) && return 0
+    caskroom=$(brew --caskroom 2>/dev/null) || return "$rc"
+    while IFS= read -r path; do
+        [[ "$path" == "$caskroom"/*/*/*.app && -d "$path" ]] || continue
+        echo "Moving stale cask app to Trash and retrying: $path"
+        mkdir -p "$HOME/.Trash"
+        mv -- "$path" "$HOME/.Trash/$(basename "$path" .app)-stale-$(date +%s).app" && recovered=true
+    done < <(printf '%s\n' "$output" | sed -n "s/.*It seems there is already an App at '\(.*\)'\..*/\1/p")
+    [[ "$recovered" == true ]] || return "$rc"
+    brew upgrade "$@"
+}
+
 update_homebrew() {
     local rc=0
     safe_execute "Homebrew update" brew update || rc=$?
-    safe_execute "Homebrew upgrade" brew upgrade || rc=$?
+    safe_execute "Homebrew upgrade" brew_upgrade_recovering || rc=$?
     # `brew upgrade` already removes the versions it replaces, so the full
     # cleanup (slow even when there is nothing to do) runs on an interval.
     if interval_is_fresh brew-cleanup "$BREW_CLEANUP_INTERVAL_DAYS"; then
@@ -396,7 +423,7 @@ update_homebrew_auto_update_casks() {
     if [[ "$DRY_RUN" != true ]]; then
         printf '  %b·  pkg-based casks may prompt for your sudo password%b\n' "$DIM" "$NC"
     fi
-    safe_execute "Homebrew auto-update casks" brew upgrade --cask --greedy-auto-updates || return $?
+    safe_execute "Homebrew auto-update casks" brew_upgrade_recovering --cask --greedy-auto-updates || return $?
     [[ "$DRY_RUN" == true ]] || interval_write_state brew-casks "$(date +%s)"
 }
 

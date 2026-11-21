@@ -138,6 +138,19 @@ test_invalid_values_rejected() {
   assert_contains "$OUT" "UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS: expected a whole number"
 }
 
+test_stale_cask_app_is_trashed_and_upgrade_retried() {
+  local d="$tmp/stale-app"; setup_case "$d"
+  local stale="$d/caskroom/claude/1.0/Claude.app"
+  mkdir -p "$stale"
+  # `brew upgrade` fails while the stale Caskroom app exists, like Homebrew.
+  perl -0pi -e 's|exit 0\n\z|[[ "\$1" == --caskroom ]] \&\& { echo "\$bindir/../caskroom"; exit 0; }\nif [[ "\$*" == upgrade \&\& -d "\$bindir/../caskroom/claude/1.0/Claude.app" ]]; then\n  echo "Error: claude: It seems there is already an App at \x27\$bindir/../caskroom/claude/1.0/Claude.app\x27." >\&2; exit 1\nfi\nexit 0\n|' "$d/bin/brew"
+  run_expect "$d" 0
+  [[ ! -e "$stale" ]] || fail "stale app not removed"
+  ls "$d/home/.Trash" | grep -q '^Claude-stale-.*\.app$' || fail "stale app not in Trash"
+  [[ "$(grep -c '^upgrade$' "$d/bin/brew-calls")" == 2 ]] || fail "upgrade not retried"
+  assert_contains "$(summary_line "Homebrew upgrade")" "Success"
+}
+
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 trap 'rm -rf "$tmp"' EXIT
@@ -149,5 +162,6 @@ test_failures_are_retried
 test_upgrade_failure_fails_stage_when_cleanup_skipped
 test_dry_run_records_nothing
 test_invalid_values_rejected
+test_stale_cask_app_is_trashed_and_upgrade_retried
 
 echo "PASS"
