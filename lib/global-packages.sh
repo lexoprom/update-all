@@ -208,22 +208,11 @@ _global_packages_pnpm_run() {
     local log_file="$report_dir/pnpm_update.log"
     local before_list="$report_dir/pnpm_list_before.txt"
     local before_err="$report_dir/pnpm_list_before.err"
-    local recovery_log="$report_dir/pnpm_recovery.log"
 
-    # Capture list output and stderr explicitly. A broken pnpm launcher exits
-    # non-zero; treating that as an empty parse would falsely report "No global
-    # pnpm packages detected." When the list fails, bootstrap pnpm via npm/npx
-    # (the same recovery command as update-all.commands) and retry exactly once
-    # before giving up.
-    if ! _global_packages_execute pnpm list -g --depth=0 > "$before_list" 2> "$before_err"; then
-        if ! pnpm_config_pm_on_fail=ignore _global_packages_execute npx --yes pnpm@latest-11 self-update > "$recovery_log" 2>&1; then
-            _global_packages_log_failure "$recovery_log" "⚠️ pnpm recovery failed. Details:"
-            return 1
-        fi
-        _global_packages_capture "$before_list" "$before_err" "⚠️ pnpm global package list failed after recovery. Details:" \
-            pnpm list -g --depth=0 || return 1
-        echo "Recovered pnpm via npm; retrying global package list."
-    fi
+    # Capture list output and stderr explicitly so a failing or timed-out
+    # `pnpm list` is never mistaken for "No global pnpm packages detected."
+    _global_packages_capture "$before_list" "$before_err" \
+        "⚠️ pnpm global package list failed. Details:" pnpm list -g --depth=0 || return 1
 
     declare -A old_versions=()
     parse_pnpm_tree old_versions < "$before_list"
@@ -267,7 +256,7 @@ _global_packages_pnpm_run() {
 _global_packages_bun_run() {
     local base_dir="${1:-/tmp}" workdir exit_code=0
     [[ -d "$base_dir" ]] || base_dir="/tmp"
-    workdir="$(mktemp -d "$base_dir/global-packages-bun.XXXXXX")"
+    workdir="$(mktemp -d "$base_dir/global-packages-bun.XXXXXX")" || return 1
     _global_packages_bun_update "$1" "$workdir" || exit_code=$?
     rm -rf "$workdir"
     return "$exit_code"
@@ -353,14 +342,26 @@ global_packages_run() {
     local -a managers=("$@")
     if [[ ${#managers[@]} -eq 0 ]]; then
         managers=("${GLOBAL_PACKAGES_DEFAULT_MANAGERS[@]}")
+    else
+        local -a unique_managers=()
+        local -A seen_managers=()
+        local m
+        for m in "${managers[@]}"; do
+            if [[ -z "${seen_managers[$m]+set}" ]]; then
+                seen_managers["$m"]=1
+                unique_managers+=("$m")
+            fi
+        done
+        managers=("${unique_managers[@]}")
     fi
 
-    local state_base="${report_dir:-/tmp}" state_dir
+    local pm label status entry failures=0
+    # Created on first background run, so dry runs and not-installed managers
+    # report correctly even when no temp dir can be made.
+    local state_base="${report_dir:-/tmp}" state_dir=""
     [[ -d "$state_base" ]] || state_base="/tmp"
-    state_dir="$(mktemp -d "$state_base/global-packages-state.XXXXXX")"
 
     local -a pending=()
-    local pm label status entry failures=0
 
     for pm in "${managers[@]}"; do
         label="$(_global_packages_label "$pm")"
@@ -381,6 +382,16 @@ global_packages_run() {
             continue
         fi
 
+        if [[ -z "$state_dir" ]]; then
+            state_dir="$(mktemp -d "$state_base/global-packages-state.XXXXXX" 2>/dev/null \
+                || mktemp -d "/tmp/global-packages-state.XXXXXX")" || state_dir=""
+        fi
+        if [[ -z "$state_dir" ]]; then
+            _global_packages_set_status results_map "$pm" "$label" "❌ Failed" "$status_sink"
+            failures=$((failures + 1))
+            continue
+        fi
+
         results_map["label.$pm"]="$label"
 
         _global_packages_run_one "$pm" "$report_dir" "$state_dir" &
@@ -392,7 +403,11 @@ global_packages_run() {
         pm="${entry%%:*}"
         wait "${entry##*:}" || true
         label="${results_map["label.$pm"]}"
-        status="$(< "$state_dir/$pm.status")"
+        if [[ -s "$state_dir/$pm.status" ]]; then
+            status="$(< "$state_dir/$pm.status")"
+        else
+            status="❌ Failed"
+        fi
         results_map["status.$pm"]="$status"
 
         if [[ -s "$state_dir/$pm.output" ]]; then
@@ -407,7 +422,7 @@ global_packages_run() {
         [[ "$status" == "❌ Failed" ]] && failures=$((failures + 1))
     done
 
-    rm -rf "$state_dir"
+    [[ -z "$state_dir" ]] || rm -rf "$state_dir"
 
     results_map[failures]="$failures"
     results_map[managers]="${managers[*]}"

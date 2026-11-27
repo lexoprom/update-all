@@ -12,9 +12,13 @@ _pm_print_upgrade() {
 }
 
 # Store a "name@version" leaf (scoped names keep their leading @).
+# Skip linked packages ("pkg@1.0.0 -> ./path") and strip trailing annotations
+# (e.g. "extraneous", "invalid: ...").
 _pm_store_leaf() {
     local -n _leaf_out="$1"
     local pkg="$2"
+    [[ "$pkg" == *"->"* ]] && return 0
+    pkg="${pkg%%[[:space:]]*}"
     local name="${pkg%@*}"
     local version="${pkg##*@}"
     [[ -z "$name" || "$name" == "$pkg" || -z "$version" ]] && return 0
