@@ -13,11 +13,11 @@ update-all doctor --offline        # Local checks only
 update-all doctor --verbose        # Include commands and full diagnostics
 ```
 
-Stages run in order: Homebrew and the macOS update check in parallel, then
-Homebrew casks marked `auto_updates` (`brew upgrade --cask --greedy-auto-updates`,
-serial because pkg installers may prompt for a sudo password), then mise (after
-Homebrew, which may upgrade mise itself), then global package managers, then
-custom commands.
+Stages run in order: Homebrew formulae (`brew upgrade --formula`) and the macOS
+update check in parallel, then Homebrew casks (`brew upgrade --cask`, adding
+`--greedy-auto-updates` on `UPDATE_ALL_CASKS_INTERVAL_DAYS`, serial because pkg
+installers may prompt for a sudo password), then mise (after Homebrew, which may
+upgrade mise itself), then global package managers, then custom commands.
 
 Custom commands run at most once every `UPDATE_ALL_COMMANDS_INTERVAL_DAYS` days
 (default 7; 0 runs them every time). A run is recorded only when every command

@@ -74,11 +74,14 @@ test_second_run_skips_both() {
   run_expect "$d" 0
   expect_counts "$d" 1 1
   assert_contains "$(summary_line "Homebrew cleanup")" "Skipped (last run"
+  assert_contains "$(summary_line "Homebrew casks")" "Success"
   assert_contains "$(summary_line "Homebrew auto-update casks")" "Skipped (last run"
-  [[ "$(receipt_result "$d" "Homebrew cleanup")" == skipped ]] || fail "cleanup receipt not skipped"
-  [[ "$(receipt_result "$d" "stage:homebrew_casks")" == ok ]] || fail "casks stage not ok"
-  # Homebrew update/upgrade still ran.
-  [[ "$(grep -c '^upgrade$' "$d/bin/brew-calls")" == 2 ]] || fail "brew upgrade did not run twice"
+  assert_eq "skipped" "$(receipt_result "$d" "Homebrew cleanup")"
+  assert_eq "ok" "$(receipt_result "$d" "stage:homebrew_casks")"
+  # Formulae upgrade in parallel phase1 on every run; regular casks run
+  # serially when auto-update casks are skipped by the interval.
+  [[ "$(grep -c '^upgrade --formula$' "$d/bin/brew-calls")" == 2 ]] || fail "brew upgrade --formula did not run twice"
+  [[ "$(grep -c '^upgrade --cask$' "$d/bin/brew-calls")" == 1 ]] || fail "brew upgrade --cask did not run once on skipped interval"
 }
 
 test_stale_state_runs() {
@@ -117,8 +120,8 @@ test_failures_are_retried() {
 test_upgrade_failure_fails_stage_when_cleanup_skipped() {
   local d="$tmp/upgrade-fail"; setup_case "$d"
   run_expect "$d" 0
-  # Make `brew upgrade` (formulae) fail on the next run.
-  perl -0pi -e 's/exit 0\n\z/[[ "\$*" == upgrade ]] \&\& exit 5\nexit 0\n/' "$d/bin/brew"
+  # Make `brew upgrade --formula` fail on the next run.
+  perl -0pi -e 's/exit 0\n\z/[[ "\$*" == "upgrade --formula" ]] \&\& exit 5\nexit 0\n/' "$d/bin/brew"
   run_expect "$d" 1
   [[ "$(receipt_result "$d" "stage:homebrew")" == failed ]] || fail "stage should report the upgrade failure"
 }
@@ -141,13 +144,14 @@ test_stale_cask_app_is_trashed_and_upgrade_retried() {
   local d="$tmp/stale-app"; setup_case "$d"
   local stale="$d/caskroom/claude/1.0/Claude.app"
   mkdir -p "$stale"
-  # `brew upgrade` fails while the stale Caskroom app exists, like Homebrew.
-  perl -0pi -e 's|exit 0\n\z|[[ "\$1" == --caskroom ]] \&\& { echo "\$bindir/../caskroom"; exit 0; }\nif [[ "\$*" == upgrade \&\& -d "\$bindir/../caskroom/claude/1.0/Claude.app" ]]; then\n  echo "Error: claude: It seems there is already an App at \x27\$bindir/../caskroom/claude/1.0/Claude.app\x27." >\&2; exit 1\nfi\nexit 0\n|' "$d/bin/brew"
+  # `brew upgrade --cask` fails while the stale Caskroom app exists, like Homebrew.
+  perl -0pi -e 's|exit 0\n\z|[[ "\$1" == --caskroom ]] \&\& { echo "\$bindir/../caskroom"; exit 0; }\nif [[ "\$*" == "upgrade --cask --greedy-auto-updates" \&\& -d "\$bindir/../caskroom/claude/1.0/Claude.app" ]]; then\n  echo "Error: claude: It seems there is already an App at \x27\$bindir/../caskroom/claude/1.0/Claude.app\x27." >\&2; exit 1\nfi\nexit 0\n|' "$d/bin/brew"
   run_expect "$d" 0
   [[ ! -e "$stale" ]] || fail "stale app not removed"
   ls "$d/home/.Trash" | grep -q '^Claude-stale-.*\.app$' || fail "stale app not in Trash"
-  [[ "$(grep -c '^upgrade$' "$d/bin/brew-calls")" == 2 ]] || fail "upgrade not retried"
-  assert_contains "$(summary_line "Homebrew upgrade")" "Success"
+  [[ "$(grep -c '^upgrade --cask --greedy-auto-updates$' "$d/bin/brew-calls")" == 2 ]] || fail "upgrade not retried"
+  assert_contains "$(summary_line "Homebrew casks")" "Success"
+  [[ -z "$(summary_line "Homebrew auto-update casks")" ]] || fail "greedy run logged a separate auto-update row"
 }
 
 tmp="$(mktemp -d)"

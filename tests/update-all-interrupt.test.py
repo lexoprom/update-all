@@ -14,7 +14,7 @@ BASH = shutil.which('bash')
 
 # Fake tools: the stage under test records its PID and then hangs.
 FAKES = {
-    'brew': '[[ "$1" == upgrade && -z "${2:-}" && -f "$(dirname "$0")/hang-brew" ]] && '
+    'brew': '[[ "$1" == upgrade && "${2:-}" == --formula && -f "$(dirname "$0")/hang-brew" ]] && '
             '{ echo $$ > "$(dirname "$0")/brew.pid"; exec sleep 60; }\nexit 0\n',
     'mise': '[[ "$1" == activate ]] && echo ":"\n'
             '[[ "$1" == upgrade && -f "$(dirname "$0")/hang-mise" ]] && '

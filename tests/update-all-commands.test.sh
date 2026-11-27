@@ -371,6 +371,16 @@ test_global_managers_subset_label() {
   assert_contains "$out" "5/5  Updating global packages (npm, uv)"
 }
 
+test_global_managers_deduplicates_names() {
+  local case_dir="$tmp/managers-dedup"
+  setup_case "$case_dir"
+  local out
+  out="$(UPDATE_ALL_GLOBAL_MANAGERS="npm uv npm" run_case "$case_dir" --dry-run --skip-commands)"
+  assert_contains "$out" "5/5  Updating global packages (npm, uv)"
+  [[ "$(printf '%s\n' "$out" | grep -c 'npm global packages')" == 1 ]] || fail "duplicate npm summary lines"
+  [[ "$(printf '%s\n' "$out" | grep -c 'uv tools')" == 1 ]] || fail "duplicate uv summary lines"
+}
+
 test_tool_timeout_rejects_invalid_value() {
   local case_dir="$tmp/timeout-invalid"
   setup_case "$case_dir"
@@ -433,6 +443,7 @@ test_commands_interval_force_and_zero
 test_commands_interval_reruns_after_edit_or_failure
 test_commands_interval_rejects_invalid_value
 test_global_managers_subset_label
+test_global_managers_deduplicates_names
 test_tool_timeout_rejects_invalid_value
 test_live_lock_blocks_second_run
 test_dry_run_skips_npm_snapshot

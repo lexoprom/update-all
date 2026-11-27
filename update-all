@@ -400,7 +400,7 @@ brew_upgrade_recovering() {
 update_homebrew() {
     local rc=0
     safe_execute "Homebrew update" brew update || rc=$?
-    safe_execute "Homebrew upgrade" brew_upgrade_recovering || rc=$?
+    safe_execute "Homebrew upgrade" brew upgrade --formula || rc=$?
     # `brew upgrade` already removes the versions it replaces, so the full
     # cleanup (slow even when there is nothing to do) runs on an interval.
     if interval_is_fresh brew-cleanup "$BREW_CLEANUP_INTERVAL_DAYS"; then
@@ -413,23 +413,25 @@ update_homebrew() {
     return "$rc"
 }
 
-# Plain `brew upgrade` skips casks marked auto_updates, assuming the app keeps
-# itself current. Many don't (gcloud-cli never does; Zoom/Drive/Karabiner lag
-# major versions), so upgrade them explicitly. `--greedy-auto-updates` rather
-# than `--greedy`: the latter also reinstalls every `version :latest` cask on
-# each run. Runs serially, outside the parallel phase, because pkg-based casks
-# prompt for a sudo password on the terminal. Most of these apps do update
-# themselves, and upgrading reinstalls running apps, so this runs on an
-# interval (UPDATE_ALL_CASKS_INTERVAL_DAYS).
-update_homebrew_auto_update_casks() {
-    if interval_is_fresh brew-casks "$CASKS_INTERVAL_DAYS"; then
-        log_status "Homebrew auto-update casks" "$INTERVAL_SKIP_REASON"
-        return 0
-    fi
+# Casks run serially, outside the parallel phase, because pkg-based casks can
+# prompt for a sudo password on the terminal. Plain `brew upgrade --cask`
+# skips casks marked auto_updates, assuming the app keeps itself current;
+# many don't (gcloud-cli never does; Zoom/Drive/Karabiner lag major versions),
+# so on UPDATE_ALL_CASKS_INTERVAL_DAYS we include `--greedy-auto-updates`
+# (instead of `--greedy`, which reinstalls every `version :latest` cask on each
+# run).
+update_homebrew_casks() {
     if [[ "$DRY_RUN" != true ]]; then
         printf '  %b·  pkg-based casks may prompt for your sudo password%b\n' "$DIM" "$NC"
     fi
-    safe_execute "Homebrew auto-update casks" brew_upgrade_recovering --cask --greedy-auto-updates || return $?
+    if interval_is_fresh brew-casks "$CASKS_INTERVAL_DAYS"; then
+        log_status "Homebrew auto-update casks" "$INTERVAL_SKIP_REASON"
+        safe_execute "Homebrew casks" brew_upgrade_recovering --cask || return $?
+        return 0
+    fi
+    # One "Homebrew casks" row covers whichever upgrade ran; the auto-update
+    # row only reports the interval skip.
+    safe_execute "Homebrew casks" brew_upgrade_recovering --cask --greedy-auto-updates || return $?
     [[ "$DRY_RUN" == true ]] || interval_write_state brew-casks "$(date +%s)"
 }
 
@@ -495,7 +497,8 @@ update_global_packages() {
 # normalized form so doctor.py sees the same selection.
 GLOBAL_MANAGERS_SELECTED=()
 resolve_global_managers() {
-    local -a managers=()
+    local -a managers=() unique=()
+    local -A seen=()
     local pm
     if [[ -n "${UPDATE_ALL_GLOBAL_MANAGERS+set}" ]]; then
         read -r -d '' -a managers <<< "$UPDATE_ALL_GLOBAL_MANAGERS" || true
@@ -504,7 +507,12 @@ resolve_global_managers() {
                 echo "UPDATE_ALL_GLOBAL_MANAGERS: unknown manager '$pm' (supported: ${GLOBAL_PACKAGES_DEFAULT_MANAGERS[*]})" >&2
                 return 1
             fi
+            if [[ -z "${seen[$pm]+set}" ]]; then
+                seen["$pm"]=1
+                unique+=("$pm")
+            fi
         done
+        managers=("${unique[@]}")
         export UPDATE_ALL_GLOBAL_MANAGERS="${managers[*]}"
     else
         managers=("${GLOBAL_PACKAGES_DEFAULT_MANAGERS[@]}")
@@ -697,7 +705,7 @@ homebrew_tool_enabled() { command_exists brew; }
 homebrew_tool_components() {
     printf '%s\n' "Homebrew update" "Homebrew upgrade" "Homebrew cleanup"
 }
-homebrew_casks_tool_components() { printf '%s\n' "Homebrew auto-update casks"; }
+homebrew_casks_tool_components() { printf '%s\n' "Homebrew casks" "Homebrew auto-update casks"; }
 
 macos_tool_enabled() { command_exists softwareupdate; }
 macos_tool_components() { printf '%s\n' "macOS Updates"; }
@@ -751,8 +759,8 @@ configure_tool_runner() {
 
     tool_runner_register "homebrew" "phase1" "Updating Homebrew" \
         homebrew_tool_enabled update_homebrew homebrew_tool_components
-    tool_runner_register "homebrew_casks" "casks" "Updating self-updating Homebrew casks" \
-        homebrew_tool_enabled update_homebrew_auto_update_casks homebrew_casks_tool_components
+    tool_runner_register "homebrew_casks" "casks" "Updating Homebrew casks" \
+        homebrew_tool_enabled update_homebrew_casks homebrew_casks_tool_components
     tool_runner_register "macos" "phase1" "Checking macOS System Updates" \
         macos_tool_enabled check_macos_updates macos_tool_components
     tool_runner_register "mise" "runtimes" "Updating mise tools (Runtimes)" \
