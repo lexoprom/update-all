@@ -32,7 +32,11 @@ elif name == 'brew':
     if args == ['--prefix']: print(os.environ['HOME'] + '/brew')
     elif args == ['outdated', '--json=v2', '--greedy-auto-updates']: print('{"formulae": [], "casks": []}')
 elif name in ('npm', 'pnpm'):
-    if args[:1] == ['list'] and '--json' in args: print('{}' if name == 'npm' else '[]')
+    if args[:1] == ['list'] and '--json' in args:
+        if os.environ.get('SLOW_NPM_PID') and name == 'npm':
+            pathlib.Path(os.environ['SLOW_NPM_PID']).write_text(str(os.getpid()))
+            time.sleep(30)
+        print('{}' if name == 'npm' else '[]')
     elif args[:1] == ['root']: print(os.environ['HOME'] + '/globals')
     elif args[:1] == ['outdated']: print('{}')
 elif name == 'bun':
@@ -148,6 +152,47 @@ class CLITests(unittest.TestCase):
         self.assertEqual(proc.returncode, 143, output)
         self.assertEqual(json.loads(self.receipt.read_text())['state'], 'interrupted')
         self.assertFalse(self.lock.exists())
+
+    def _assert_sigint_aborts_immediately(self, cmd, pid_file):
+        env = dict(self.env, SLOW_NPM_PID=str(pid_file))
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        npm_pid = None
+        try:
+            deadline = time.monotonic() + 10
+            while not (pid_file.exists() and pid_file.read_text().strip()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            npm_pid = int(pid_file.read_text())
+            started = time.monotonic()
+            os.killpg(proc.pid, signal.SIGINT)
+            self.assertEqual(proc.wait(timeout=5), 130)
+            self.assertLess(time.monotonic() - started, 5)
+            time.sleep(0.2)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(npm_pid, 0)
+        finally:
+            if npm_pid:
+                try:
+                    os.kill(npm_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+
+    def test_ctrl_c_aborts_doctor_and_history_immediately(self):
+        self._assert_sigint_aborts_immediately(
+            [str(self.script), 'doctor', '--offline'],
+            self.root / 'doctor-npm.pid',
+        )
+        report = self.root / 'history-report'
+        report.mkdir()
+        self._assert_sigint_aborts_immediately(
+            [sys.executable, str(self.root / 'lib/doctor.py'), 'start', str(report)],
+            self.root / 'history-npm.pid',
+        )
 
 
 if __name__ == '__main__':

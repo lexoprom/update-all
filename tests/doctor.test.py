@@ -116,6 +116,30 @@ class DoctorTests(unittest.TestCase):
         self.assertIn('freshness check incomplete', text)
         self.assertNotIn('no remaining updates', text)
 
+    def test_force_intervals_advice_only_for_auto_update_casks(self):
+        greedy = {'formulae': [], 'casks': [
+            {'name': 'plain', 'installed_versions': ['1'], 'current_version': '2'},
+            {'name': 'auto', 'installed_versions': ['1'], 'current_version': '2'}]}
+        r = FakeRunner({('brew', 'update'): '', ('brew', 'list', '--pinned'): '',
+                        ('brew', 'outdated', '--json=v2', '--greedy-auto-updates'): json.dumps(greedy),
+                        ('brew', 'outdated', '--json=v2', '--cask'): json.dumps(
+                            {'formulae': [], 'casks': greedy['casks'][:1]})}, ['brew'])
+        doc = d.Doctor(r)
+        advice = {}
+        doc.emit = lambda status, label, detail='', adv='': advice.__setitem__(label, adv)
+        doc.online('brew')
+        self.assertNotIn('--force-intervals', advice['brew: plain has an update'])
+        self.assertIn('--force-intervals', advice['brew: auto has an update'])
+
+    def test_runner_pool_aborts_only_on_interrupt(self):
+        r = d.Runner(offline=True)
+        with self.assertRaises(ValueError), d._runner_pool(r, 1):
+            raise ValueError('boom')
+        self.assertFalse(r._aborted)
+        with self.assertRaises(KeyboardInterrupt), d._runner_pool(r, 1):
+            raise KeyboardInterrupt
+        self.assertTrue(r._aborted)
+
     def test_pins_and_prunable_versions_are_not_failures(self):
         r = FakeRunner({('brew', 'update'): '', ('brew', 'list', '--pinned'): 'node',
                         ('brew', 'outdated', '--json=v2', '--greedy-auto-updates'): json.dumps({
@@ -441,6 +465,26 @@ class DoctorTests(unittest.TestCase):
         npm_idx = next(i for i, line in enumerate(lines) if 'npm: 0 installed entries' in line)
         uv_idx = next(i for i, line in enumerate(lines) if 'uv: 0 installed entries' in line)
         self.assertLess(npm_idx, uv_idx)
+
+    def test_verbose_brew_inventory_is_buffered_under_brew_section(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        brew = bindir / 'brew'
+        brew.write_text('#!/bin/sh\n[ "$1" = "--prefix" ] && echo /fake/brew\nexit 0\n')
+        brew.chmod(0o755)
+        r = d.Runner(offline=True, verbose=True)
+        r.env['PATH'] = str(bindir)
+        doc = d.Doctor(r, offline=True)
+        _, live_stdout = self.output(lambda: setattr(self, '_brew_events', doc._run_buffered(doc.inventory, 'brew')))
+        self.assertEqual(live_stdout, '')
+        raw = [ev[1] for ev in self._brew_events if ev[0] == 'raw']
+        emits = [ev for ev in self._brew_events if ev[0] == 'emit']
+        self.assertEqual(len(raw), 3)
+        self.assertTrue(all('brew' in line for line in raw))
+        self.assertEqual(emits[0][1:3], ('OK', 'brew: 0 installed entries'))
+        first_emit_idx = next(i for i, ev in enumerate(self._brew_events) if ev[0] == 'emit')
+        last_raw_idx = max(i for i, ev in enumerate(self._brew_events) if ev[0] == 'raw')
+        self.assertLess(last_raw_idx, first_emit_idx)
 
     def test_receipt_writes_hold_exclusive_lock(self):
         original_write = d.atomic_write

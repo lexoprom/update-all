@@ -38,10 +38,15 @@ def clean(text):
 
 
 def now():
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    # Python 3.8-3.10 (including macOS /usr/bin/python3) lacks datetime.UTC.
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()  # noqa: UP017
 
 
 class CheckError(Exception):
+    pass
+
+
+class _Aborted(BaseException):
     pass
 
 
@@ -62,6 +67,17 @@ class Runner:
         self.verbose = verbose
         self.timeout = timeout
         self._local = threading.local()
+        self._proc_lock = threading.Lock()
+        self._procs = set()
+        self._aborted = False
+
+    def abort(self):
+        with self._proc_lock:
+            self._aborted = True
+            procs = list(self._procs)
+        for proc in procs:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
 
     @contextlib.contextmanager
     def capture_verbose(self, sink):
@@ -109,20 +125,37 @@ class Runner:
                 sink(line)
             else:
                 print(line, flush=True)
+        with self._proc_lock:
+            if self._aborted:
+                raise _Aborted()
         try:
             with subprocess.Popen(args, cwd=cwd or self.cwd, env=child_env,
                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, start_new_session=True) as proc:
+                with self._proc_lock:
+                    if self._aborted:
+                        with contextlib.suppress(ProcessLookupError, OSError):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        proc.communicate()
+                        raise _Aborted()
+                    self._procs.add(proc)
                 try:
                     out, err = proc.communicate(timeout=timeout or self.timeout)
                 except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    with contextlib.suppress(ProcessLookupError, OSError):
+                        os.killpg(proc.pid, signal.SIGKILL)
                     proc.communicate()
                     if sys.exc_info()[0] is KeyboardInterrupt:
                         raise
                     raise CheckError('timed out: ' + shlex.join(args))
+                finally:
+                    with self._proc_lock:
+                        self._procs.discard(proc)
         except OSError as exc:
             raise CheckError(str(exc)) from exc
+        with self._proc_lock:
+            if self._aborted:
+                raise _Aborted()
         out, err = clean(out.decode(errors='replace')), clean(err.decode(errors='replace'))
         if proc.returncode not in accepted:
             raise CheckError(f'{shlex.join(args)} (exit {proc.returncode}): {(err or out).strip()[:3000]}')
@@ -172,15 +205,64 @@ def js_packages(data, root=None):
     return records
 
 
+@contextlib.contextmanager
+def _runner_pool(runner, max_workers):
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    futures = []
+
+    def submit(fn, *args, **kwargs):
+        fut = pool.submit(fn, *args, **kwargs)
+        futures.append(fut)
+        return fut
+
+    aborted = False
+    try:
+        yield submit
+    except (KeyboardInterrupt, SystemExit, _Aborted):
+        # Abort is permanent for the runner, so reserve it for interrupts;
+        # ordinary errors wait for in-flight checks like a plain executor.
+        aborted = True
+        runner.abort()
+        for fut in futures:
+            fut.cancel()
+        raise
+    finally:
+        pool.shutdown(wait=not aborted)
+
+
 def _collect_brew(r, manager):
     records = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-        prefix_fut = pool.submit(r.output, 'brew', '--prefix')
-        formula_fut = pool.submit(r.output, 'brew', 'list', '--versions', '--formula')
-        cask_fut = pool.submit(r.output, 'brew', 'list', '--versions', '--cask')
+    sink = getattr(r._local, 'verbose_sink', None)
+    sink_lock = threading.Lock()
+
+    def locked_sink(line):
+        with sink_lock:
+            sink(line)
+
+    def call(*args):
+        if sink is not None:
+            with r.capture_verbose(locked_sink):
+                return r.output(*args)
+        return r.output(*args)
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    futs = []
+    aborted = False
+    try:
+        prefix_fut = pool.submit(call, 'brew', '--prefix')
+        formula_fut = pool.submit(call, 'brew', 'list', '--versions', '--formula')
+        cask_fut = pool.submit(call, 'brew', 'list', '--versions', '--cask')
+        futs = [prefix_fut, formula_fut, cask_fut]
         prefix = prefix_fut.result()
         outputs = (('formula', 'Cellar', formula_fut.result()),
                    ('cask', 'Caskroom', cask_fut.result()))
+    except (_Aborted, KeyboardInterrupt):
+        aborted = True
+        for fut in futs:
+            fut.cancel()
+        raise
+    finally:
+        pool.shutdown(wait=not aborted)
     for kind, directory, output in outputs:
         for line in output.splitlines():
             fields = line.split()
@@ -317,8 +399,8 @@ def snapshot(runner):
     to_collect = [name for name in MANAGERS if name not in skipped]
     collected = {}
     if to_collect:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(to_collect)) as pool:
-            futures = {name: pool.submit(collect, runner, name) for name in to_collect}
+        with _runner_pool(runner, len(to_collect)) as submit:
+            futures = {name: submit(collect, runner, name) for name in to_collect}
             for name, fut in futures.items():
                 collected[name] = fut.result()
     result = {}
@@ -714,14 +796,19 @@ class Doctor:
             return
         data = self.r.data('brew', 'outdated', '--json=v2', '--greedy-auto-updates')
         entries = data['formulae'] + data['casks']
-        casks = {id(entry) for entry in data['casks']}
+        # update-all upgrades plain casks on every run but auto_updates casks
+        # only every few days (UPDATE_ALL_CASKS_INTERVAL_DAYS); --force-intervals
+        # runs those now. Casks missing from the non-greedy list are auto_updates.
+        auto_casks = set()
+        if data['casks']:
+            plain = self.r.data('brew', 'outdated', '--json=v2', '--cask')['casks']
+            plain_names = {c.get('name') or c['token'] for c in plain}
+            auto_casks = {id(c) for c in data['casks'] if (c.get('name') or c['token']) not in plain_names}
         pinned = set(self.r.output('brew', 'list', '--pinned').splitlines())
         for entry in entries:
             name = entry.get('name') or entry['token']
             pin = entry.get('pinned', False) or name in pinned
-            # update-all upgrades auto_updates casks only every few days
-            # (UPDATE_ALL_CASKS_INTERVAL_DAYS); --force-intervals runs it now.
-            run = 'Run update-all --force-intervals' if id(entry) in casks else 'Run update-all'
+            run = 'Run update-all --force-intervals' if id(entry) in auto_casks else 'Run update-all'
             installed = entry.get('installed_versions', entry.get('installed', '?'))
             current = entry.get('current_version', '?')
             self.emit('INFO' if pin else 'WARN', 'brew: ' + name + (' is pinned' if pin else ' has an update'),
@@ -902,10 +989,10 @@ class Doctor:
         has_softwareupdate = bool(self.r.exists('softwareupdate'))
         # Independent managers and softwareupdate run concurrently; each section's
         # findings are buffered and emitted in deterministic order.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(MANAGERS) + 1) as pool:
-            manager_futures = {manager: pool.submit(self._run_buffered, self._check_manager, manager)
+        with _runner_pool(self.r, len(MANAGERS) + 1) as submit:
+            manager_futures = {manager: submit(self._run_buffered, self._check_manager, manager)
                                for manager in MANAGERS}
-            macos_future = (pool.submit(self._run_buffered, self._check_macos)
+            macos_future = (submit(self._run_buffered, self._check_macos)
                             if has_softwareupdate and not self.offline else None)
             for manager in MANAGERS:
                 self._replay(manager_futures[manager].result())
