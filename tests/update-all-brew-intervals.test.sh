@@ -7,9 +7,8 @@ unset UPDATE_ALL_GLOBAL_MANAGERS UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS UPDATE_ALL
 # the greedy cask upgrade and `brew cleanup` are skipped when they succeeded
 # within the interval.
 
-strip_ansi() { perl -pe 's/\e\[[0-9;]*[mK]//g'; }
-fail() { echo "FAIL: $*" >&2; exit 1; }
-assert_contains() { printf '%s\n' "$1" | grep -F -- "$2" >/dev/null || fail "missing: $2"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers.sh"
+SCRIPT_BIN="update-all-brew-intervals-$$"
 
 make_fake_cmds() {
   local bindir="$1" cmd
@@ -33,7 +32,7 @@ BREW
 
 setup_case() {
   mkdir -p "$1/bin" "$1/home" "$1/lib"
-  cp ./update-all "$1/update-all"
+  cp ./update-all "$1/$SCRIPT_BIN"
   cp ./lib/*.sh ./lib/doctor.py "$1/lib/"
   printf '# no commands\n' > "$1/update-all.commands"
   make_fake_cmds "$1/bin"
@@ -44,7 +43,7 @@ run_case() {
   HOME="$case_dir/home" XDG_STATE_HOME="$case_dir/home/.local/state" \
     UPDATE_ALL_GLOBAL_MANAGERS="" UPDATE_ALL_RETRY_DELAY=0 UPDATE_ALL_TOOL_TIMEOUT=0 \
     PATH="$case_dir/bin:/usr/bin:/bin" \
-    env -u PNPM_HOME "$case_dir/update-all" "$@" 2>&1 | strip_ansi
+    env -u PNPM_HOME "$case_dir/$SCRIPT_BIN" "$@" 2>&1 | strip_ansi
 }
 
 run_expect() {

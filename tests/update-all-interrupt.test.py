@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Ctrl-C must stop running update commands in serial and parallel stages."""
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASH = shutil.which('bash')
@@ -32,7 +32,7 @@ class InterruptTests(unittest.TestCase):
         self.bin.mkdir()
         (self.root / 'home').mkdir()
         # A unique name keeps the lock private to this test.
-        self.script = self.root / ('update-all-interrupt-{}'.format(os.getpid()))
+        self.script = self.root / f'update-all-interrupt-{os.getpid()}'
         shutil.copy(ROOT / 'update-all', self.script)
         for lib in (ROOT / 'lib').iterdir():
             if lib.suffix in ('.sh', '.py'):
@@ -49,8 +49,8 @@ class InterruptTests(unittest.TestCase):
     def interrupt(self, stage):
         (self.bin / ('hang-' + stage)).touch()
         pid_file = self.bin / (stage + '.pid')
-        env = dict(PATH='{}:/usr/bin:/bin'.format(self.bin), HOME=str(self.root / 'home'),
-                   XDG_STATE_HOME=str(self.root / 'state'), UPDATE_ALL_GLOBAL_MANAGERS='')
+        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': str(self.root / 'home'),
+               'XDG_STATE_HOME': str(self.root / 'state'), 'UPDATE_ALL_GLOBAL_MANAGERS': ''}
         proc = subprocess.Popen([BASH, str(self.script), '--skip-commands'], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True)
@@ -67,7 +67,7 @@ class InterruptTests(unittest.TestCase):
             time.sleep(0.2)
             with self.assertRaises(ProcessLookupError):
                 os.kill(tool, 0)
-            self.assertFalse(Path('/tmp/.{}_lock'.format(self.script.name)).exists())
+            self.assertFalse(Path(f'/tmp/.{self.script.name}_lock').exists())
         finally:
             for pid in (tool,):
                 if pid:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 
 GLOBAL_PACKAGES_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./pm-helpers.sh
@@ -14,6 +15,17 @@ declare -grA GLOBAL_PACKAGES_LABELS=(
     [uv]="uv tools"
 )
 
+# shellcheck disable=SC2034
+declare -grA GLOBAL_PACKAGES_DISPLAY_NAMES=(
+    [bun]="Bun"
+    [npm]="npm"
+    [pnpm]="pnpm"
+    [pipx]="Pipx"
+    [uv]="uv"
+)
+
+# shellcheck disable=SC2034
+declare -gra GLOBAL_PACKAGES_DISPLAY_ORDER=(bun npm pnpm pipx uv)
 declare -gra GLOBAL_PACKAGES_DEFAULT_MANAGERS=(pipx npm pnpm bun uv)
 declare -gr GLOBAL_PACKAGES_NPM_BASELINE_FILE="npm_globals.before"
 
@@ -69,6 +81,7 @@ _global_packages_print_info() {
 }
 
 _global_packages_set_status() {
+    # shellcheck disable=SC2034
     local -n status_result="$1"
     local pm="$2"
     local label="$3"
@@ -76,6 +89,7 @@ _global_packages_set_status() {
     local sink="${5:-}"
 
     status_result["label.$pm"]="$label"
+    # shellcheck disable=SC2034
     status_result["status.$pm"]="$status"
     _global_packages_emit_status "$sink" "$label" "$status"
 }
@@ -146,9 +160,11 @@ _global_packages_npm_run() {
     _global_packages_capture "$current_file" "$current_err" "⚠️ npm global package list failed. Details:" \
         npm list -g --depth=0 || return 1
     parse_npm_tree current_versions < "$current_file"
-    parse_npm_tree old_versions < "$current_file"
 
     local name
+    for name in "${!current_versions[@]}"; do
+        old_versions["$name"]="${current_versions[$name]}"
+    done
 
     local -a missing_from_current=()
     if [[ -s "$baseline_file" ]]; then
@@ -249,8 +265,9 @@ _global_packages_pnpm_run() {
 # Bun reads a project lockfile from the working directory, so every Bun call
 # runs in a fresh temporary directory that is always removed afterwards.
 _global_packages_bun_run() {
-    local workdir exit_code=0
-    workdir="$(mktemp -d "/tmp/global-packages-bun.XXXXXX")"
+    local base_dir="${1:-/tmp}" workdir exit_code=0
+    [[ -d "$base_dir" ]] || base_dir="/tmp"
+    workdir="$(mktemp -d "$base_dir/global-packages-bun.XXXXXX")"
     _global_packages_bun_update "$1" "$workdir" || exit_code=$?
     rm -rf "$workdir"
     return "$exit_code"
@@ -290,6 +307,7 @@ _global_packages_bun_update() {
         return 1
     fi
 
+    # shellcheck disable=SC2034
     declare -A new_versions=()
     if ! (cd "$workdir" && _global_packages_execute bun pm ls -g) > "$report_dir/bun_globals.after" 2> "$log_file"; then
         _global_packages_log_failure "$log_file" "⚠️ Bun global package list failed after update. Details:"
@@ -337,8 +355,9 @@ global_packages_run() {
         managers=("${GLOBAL_PACKAGES_DEFAULT_MANAGERS[@]}")
     fi
 
-    local state_dir
-    state_dir="$(mktemp -d "/tmp/global-packages-state.XXXXXX")"
+    local state_base="${report_dir:-/tmp}" state_dir
+    [[ -d "$state_base" ]] || state_base="/tmp"
+    state_dir="$(mktemp -d "$state_base/global-packages-state.XXXXXX")"
 
     local -a pending=()
     local pm label status entry failures=0
@@ -348,6 +367,7 @@ global_packages_run() {
 
         if ! _global_packages_supported "$pm"; then
             _global_packages_set_status results_map "$pm" "$label" "❌ Failed" "$status_sink"
+            failures=$((failures + 1))
             continue
         fi
 

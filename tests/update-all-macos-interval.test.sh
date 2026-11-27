@@ -5,24 +5,8 @@ unset UPDATE_ALL_GLOBAL_MANAGERS UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS
 # Tests for UPDATE_ALL_MACOS_CHECK_INTERVAL_DAYS: the macOS update check is
 # skipped when a previous check succeeded within the interval.
 
-strip_ansi() {
-  perl -pe 's/\e\[[0-9;]*[mK]//g'
-}
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_contains() {
-  printf '%s\n' "$1" | grep -F -- "$2" >/dev/null || fail "missing: $2"
-}
-
-assert_not_contains() {
-  if printf '%s\n' "$1" | grep -F -- "$2" >/dev/null; then
-    fail "unexpected: $2"
-  fi
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers.sh"
+SCRIPT_BIN="update-all-macos-interval-$$"
 
 make_fake_cmds() {
   local bindir="$1"
@@ -66,9 +50,9 @@ EOF
 setup_case() {
   local case_dir="$1"
   mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
-  cp ./update-all "$case_dir/update-all"
+  cp ./update-all "$case_dir/$SCRIPT_BIN"
   cp ./lib/*.sh ./lib/doctor.py "$case_dir/lib/"
-  chmod +x "$case_dir/update-all"
+  chmod +x "$case_dir/$SCRIPT_BIN"
   make_fake_cmds "$case_dir/bin"
 }
 
@@ -78,7 +62,7 @@ run_case() {
   HOME="$case_dir/home" XDG_STATE_HOME="$case_dir/home/.local/state" \
     UPDATE_ALL_RETRY_DELAY=0 UPDATE_ALL_TOOL_TIMEOUT=0 \
     PATH="$case_dir/bin:/usr/bin:/bin" \
-    env -u PNPM_HOME "$case_dir/update-all" "$@" 2>&1 | strip_ansi
+    env -u PNPM_HOME "$case_dir/$SCRIPT_BIN" "$@" 2>&1 | strip_ansi
 }
 
 su_count() { cat "$1/bin/su-count" 2>/dev/null || echo 0; }

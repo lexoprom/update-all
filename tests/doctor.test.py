@@ -5,12 +5,10 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import signal
-import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 # Tests expect the default manager list regardless of the caller's setup.
@@ -133,7 +131,7 @@ class DoctorTests(unittest.TestCase):
         r = FakeRunner()
         doc = d.Doctor(r, offline=True)
         for manager in d.MANAGERS:
-            self.output(lambda: doc.online(manager))
+            self.output(lambda m=manager: doc.online(m))
         self.assertEqual(r.calls, [])
         self.assertEqual(doc.counts['SKIP'], 7)
 
@@ -286,8 +284,8 @@ class DoctorTests(unittest.TestCase):
 
     def receipt(self, before=None, after=None, state='completed'):
         inventories = {m: {'status': 'absent', 'packages': []} for m in d.MANAGERS}
-        return dict(schema=1, run_id='run', started_at='today', state=state,
-                    before=before or inventories, after=after or inventories, results={})
+        return {'schema': 1, 'run_id': 'run', 'started_at': 'today', 'state': state,
+                'before': before or inventories, 'after': after or inventories, 'results': {}}
 
     def test_history_distinguishes_update_loss_from_later_removal(self):
         before = {'npm': {'status': 'ok', 'packages': [d.package('lost', '1'), d.package('later', '2')]}}
@@ -310,8 +308,8 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(d.disabled_global_managers(), ('npm', 'pnpm', 'bun', 'pipx'))
             _, text = self.output(d.Doctor(FakeRunner(), offline=True).run)
         self.assertIn('[INFO] Global package updates disabled: npm, pnpm, bun, pipx', text)
-        self.assertEqual([c.args[1] for c in inspected.call_args_list], list(d.MANAGERS))
-        self.assertEqual([c.args[1] for c in online.call_args_list], ['brew', 'mise', 'uv'])
+        self.assertCountEqual([c.args[1] for c in inspected.call_args_list], list(d.MANAGERS))
+        self.assertCountEqual([c.args[1] for c in online.call_args_list], ['brew', 'mise', 'uv'])
 
     def test_unset_selection_disables_nothing(self):
         self.assertEqual(d.disabled_global_managers(), ())
@@ -384,10 +382,10 @@ class DoctorTests(unittest.TestCase):
                 d.atomic_write(d.state_path(), self.receipt())
                 newer = []
 
-                def overlapping_snapshot(runner):
+                def overlapping_snapshot(runner, captured=newer):
                     with patch.object(d, 'snapshot', return_value={}):
                         d.history('start', 'newer-run')
-                    newer.append(d.state_path().read_bytes())
+                    captured.append(d.state_path().read_bytes())
                     return {'old-snapshot': {}}
 
                 with patch.object(d, 'snapshot', side_effect=overlapping_snapshot):
@@ -396,12 +394,12 @@ class DoctorTests(unittest.TestCase):
 
     def test_finish_prints_version_changes(self):
         def inv(*items):
-            return dict(status='ok', packages=[dict(name=n, version=v, location='') for n, v in items])
-        before = dict(brew=inv(('formula:git', '2.1'), ('cask:firefox', '1'), ('formula:old', '1')),
-                      mise=inv(('node', '20.1'), ('node', '22.1')), npm=inv(('a', '1')),
-                      uv=dict(status='error', packages=[]))
-        after = dict(brew=inv(('formula:git', '2.2'), ('cask:firefox', '1'), ('formula:new', '3')),
-                     mise=inv(('node', '20.1'), ('node', '22.2')), npm=inv(('a', '1')), uv=inv(('x', '1')))
+            return {'status': 'ok', 'packages': [{'name': n, 'version': v, 'location': ''} for n, v in items]}
+        before = {'brew': inv(('formula:git', '2.1'), ('cask:firefox', '1'), ('formula:old', '1')),
+                  'mise': inv(('node', '20.1'), ('node', '22.1')), 'npm': inv(('a', '1')),
+                  'uv': {'status': 'error', 'packages': []}}
+        after = {'brew': inv(('formula:git', '2.2'), ('cask:firefox', '1'), ('formula:new', '3')),
+                 'mise': inv(('node', '20.1'), ('node', '22.2')), 'npm': inv(('a', '1')), 'uv': inv(('x', '1'))}
         self.assertEqual(d.version_changes(before, after), [
             ('brew', 'formula:git', ['2.1'], ['2.2']), ('brew', 'formula:new', [], ['3']),
             ('brew', 'formula:old', ['1'], []), ('mise', 'node', ['22.1'], ['22.2'])])
@@ -418,14 +416,39 @@ class DoctorTests(unittest.TestCase):
         d.print_changes([], stream)
         self.assertIn('No package versions changed', stream.getvalue())
 
+    def test_node_collect_skips_root_when_empty_or_paths_present(self):
+        # Empty dependencies must not spawn `<manager> root -g`.
+        r = FakeRunner({('npm', 'list', '-g', '--depth=0', '--json'): '{}'}, ['npm'])
+        inv = d.collect(r, 'npm')
+        self.assertEqual(inv['status'], 'ok')
+        self.assertEqual(inv['packages'], [])
+        self.assertEqual(r.calls, [('npm', 'list', '-g', '--depth=0', '--json')])
+        # Entries with explicit `path` must not spawn `<manager> root -g` either.
+        r = FakeRunner({('pnpm', 'list', '-g', '--depth=0', '--json'):
+                        json.dumps([{'dependencies': {'pkg': {'version': '1.0', 'path': '/pnpm/pkg'}}}])}, ['pnpm'])
+        inv = d.collect(r, 'pnpm')
+        self.assertEqual(inv['packages'][0]['location'], '/pnpm/pkg')
+        self.assertEqual(r.calls, [('pnpm', 'list', '-g', '--depth=0', '--json')])
+
+    def test_parallel_doctor_emits_sections_in_manager_order(self):
+        r = FakeRunner({
+            ('npm', 'list', '-g', '--depth=0', '--json'): '{}',
+            ('uv', 'tool', 'list', '--show-paths', '--show-version-specifiers'): '',
+        }, ['npm', 'uv'])
+        rc, text = self.output(d.Doctor(r, offline=True).run)
+        self.assertEqual(rc, 0)
+        lines = [line for line in text.splitlines() if line.startswith('[')]
+        npm_idx = next(i for i, line in enumerate(lines) if 'npm: 0 installed entries' in line)
+        uv_idx = next(i for i, line in enumerate(lines) if 'uv: 0 installed entries' in line)
+        self.assertLess(npm_idx, uv_idx)
+
     def test_receipt_writes_hold_exclusive_lock(self):
         original_write = d.atomic_write
         writes = []
 
         def checked_write(path, data):
-            with path.with_suffix('.lock').open() as lock:
-                with self.assertRaises(BlockingIOError):
-                    d.fcntl.flock(lock, d.fcntl.LOCK_EX | d.fcntl.LOCK_NB)
+            with path.with_suffix('.lock').open() as lock, self.assertRaises(BlockingIOError):
+                d.fcntl.flock(lock, d.fcntl.LOCK_EX | d.fcntl.LOCK_NB)
             writes.append(data['state'])
             original_write(path, data)
 

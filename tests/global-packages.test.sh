@@ -2,48 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/tests/helpers.sh"
 source "$SCRIPT_DIR/lib/global-packages.sh"
-
-strip_ansi() {
-  perl -pe 's/\e\[[0-9;]*[mK]//g'
-}
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_eq() {
-  local expected="$1"
-  local actual="$2"
-  local label="${3:-value}"
-  if [[ "$expected" != "$actual" ]]; then
-    fail "$label: expected [$expected], got [$actual]"
-  fi
-}
-
-assert_ne() {
-  local unexpected="$1"
-  local actual="$2"
-  local label="${3:-value}"
-  if [[ "$unexpected" == "$actual" ]]; then
-    fail "$label: expected not [$unexpected], got [$actual]"
-  fi
-}
-
-assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null || fail "missing: $needle"
-}
-
-assert_not_contains() {
-  local haystack="$1"
-  local needle="$2"
-  if printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null; then
-    fail "unexpected: $needle"
-  fi
-}
 
 create_fake_pipx() {
   local bindir="$1"
@@ -645,7 +605,7 @@ test_bun_globals_use_temp_dir_at_boundary() {
   assert_contains "$record" "args=add -g"
   assert_contains "$record" "wrangler@latest"
   assert_contains "$record" "vercel@latest"
-  assert_contains "$record" "pwd=/tmp/global-packages-bun"
+  assert_contains "$record" "/report/global-packages-bun."
   assert_contains "$TEST_OUTPUT" "Updating Bun globals:"
   assert_contains "$TEST_OUTPUT" "wrangler: 4.73.0 → 4.74.0"
   assert_contains "$TEST_OUTPUT" "vercel: 50.33.0 → 50.34.0"
@@ -729,6 +689,20 @@ test_default_run_handles_dry_run_and_missing_managers() {
   clear_fake_env
 }
 
+test_unsupported_manager_counts_as_failure() {
+  local case_dir="$tmp/unsupported"
+  setup_case "$case_dir"
+
+  run_global_packages "$case_dir" false unknownpm
+
+  assert_eq "1" "$TEST_EXIT_CODE" "unsupported manager exit"
+  assert_eq "1" "${TEST_RESULT[failures]}" "unsupported manager failure count"
+  assert_eq "❌ Failed" "${TEST_RESULT[status.unknownpm]}" "unsupported manager status"
+  assert_contains "$(< "$STATUS_FILE")" $'unknownpm packages\t❌ Failed'
+
+  clear_fake_env
+}
+
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 cleanup() {
@@ -755,5 +729,6 @@ test_bun_globals_use_temp_dir_at_boundary
 test_bun_globals_list_errors
 test_uv_tools_upgrade_all_at_boundary
 test_default_run_handles_dry_run_and_missing_managers
+test_unsupported_manager_counts_as_failure
 
 echo "PASS"

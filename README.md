@@ -57,6 +57,9 @@ since most of those apps update themselves and upgrading reinstalls running
 apps, and `brew cleanup` (`UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS`), since
 `brew upgrade` already removes the versions it replaces. Only successful real
 runs are recorded, in `brew-casks` and `brew-cleanup` next to `macos-check`.
+If a cask upgrade fails because an interrupted earlier upgrade left a stale
+`.app` bundle in its Caskroom version directory, the stale bundle is moved to
+`~/.Trash` and `brew upgrade` is retried once.
 
 `--force-intervals` ignores every interval (macOS check, custom commands, casks,
 cleanup) for one run.
@@ -123,9 +126,9 @@ receipt still receive current-state checks; a future real update creates history
 
 ## Tests
 
-Run the isolated fake-manager suites (no real updates):
+Run the isolated fake-manager suites (no real updates; parallel by default,
+pass `--serial` to run sequentially):
 
 ```sh
-for test in tests/*.test.sh; do bash "$test" || break; done
-python3 tests/update-all-timeout.test.py && python3 tests/update-all-interrupt.test.py
+./tests/run.sh
 ```

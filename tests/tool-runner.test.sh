@@ -2,31 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/tests/helpers.sh"
 source "$SCRIPT_DIR/lib/tool-runner.sh"
-
-strip_ansi() {
-  perl -pe 's/\e\[[0-9;]*[mK]//g'
-}
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_eq() {
-  local expected="$1"
-  local actual="$2"
-  local label="${3:-value}"
-  if [[ "$expected" != "$actual" ]]; then
-    fail "$label: expected [$expected], got [$actual]"
-  fi
-}
-
-assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null || fail "missing: $needle"
-}
 
 append_status() {
   printf '%s\t%s\n' "$1" "$2" >> "$REPORT_DIR/status.log"

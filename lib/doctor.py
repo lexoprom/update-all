@@ -2,12 +2,12 @@
 """Read-only diagnostics and versioned update receipts. Python 3 stdlib only."""
 import argparse
 import collections
+import concurrent.futures
 import contextlib
 import datetime
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
@@ -15,6 +15,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import types
+from pathlib import Path
 
 MANAGERS = ('brew', 'mise', 'npm', 'pnpm', 'bun', 'pipx', 'uv')
 GLOBAL_MANAGERS = ('npm', 'pnpm', 'bun', 'pipx', 'uv')
@@ -58,6 +61,16 @@ class Runner:
         self.cwd = str(Path.home())
         self.verbose = verbose
         self.timeout = timeout
+        self._local = threading.local()
+
+    @contextlib.contextmanager
+    def capture_verbose(self, sink):
+        previous = getattr(self._local, 'verbose_sink', None)
+        self._local.verbose_sink = sink
+        try:
+            yield
+        finally:
+            self._local.verbose_sink = previous
 
     def exists(self, name):
         return shutil.which(name, path=self.env.get('PATH', ''))
@@ -90,7 +103,12 @@ class Runner:
         child_env = self.env.copy()
         child_env['PATH'] = ':'.join(p for p in self.env.get('PATH', '').split(':') if Path(p) != self.shim_dir)
         if self.verbose:
-            print('  $ ' + shlex.join(args), flush=True)
+            line = '  $ ' + shlex.join(args)
+            sink = getattr(self._local, 'verbose_sink', None)
+            if sink is not None:
+                sink(line)
+            else:
+                print(line, flush=True)
         try:
             with subprocess.Popen(args, cwd=cwd or self.cwd, env=child_env,
                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -107,8 +125,7 @@ class Runner:
             raise CheckError(str(exc)) from exc
         out, err = clean(out.decode(errors='replace')), clean(err.decode(errors='replace'))
         if proc.returncode not in accepted:
-            raise CheckError('{} (exit {}): {}'.format(shlex.join(args), proc.returncode,
-                                                      (err or out).strip()[:3000]))
+            raise CheckError(f'{shlex.join(args)} (exit {proc.returncode}): {(err or out).strip()[:3000]}')
         if proc.returncode == 0 and re.search(r'(?im)\b(?:warning|warn|error|failed)\b', err):
             raise CheckError(shlex.join(args) + ': ' + err.strip()[:3000])
         return out, err, proc.returncode
@@ -127,17 +144,18 @@ class Runner:
 def package(name, version, location='', **extra):
     if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
         raise CheckError('incomplete package metadata')
-    return dict(name=name, version=version, location=str(location), **extra)
+    return {'name': name, 'version': version, 'location': str(location), **extra}
 
 
 def path_value(value):
     return value.get('__Path__', '') if isinstance(value, dict) else str(value)
 
 
-def js_packages(data, root):
+def js_packages(data, root=None):
     records = []
     if not isinstance(data, list):
         data = [data]
+    resolved_root = None
     for tree in data:
         if tree.get('error') or tree.get('problems'):
             raise CheckError('invalid global dependency tree: ' + str(tree.get('problems', tree.get('error'))))
@@ -145,15 +163,25 @@ def js_packages(data, root):
         for name, item in deps.items():
             if item.get('missing') or item.get('invalid'):
                 raise CheckError('missing or invalid dependency: ' + name)
-            records.append(package(name, item.get('version'), item.get('path') or str(Path(root) / name)))
+            path = item.get('path')
+            if not path:
+                if resolved_root is None:
+                    resolved_root = root() if callable(root) else (root or '')
+                path = str(Path(resolved_root) / name)
+            records.append(package(name, item.get('version'), path))
     return records
 
 
 def _collect_brew(r, manager):
     records = []
-    prefix = r.output('brew', '--prefix')
-    for kind, directory in (('formula', 'Cellar'), ('cask', 'Caskroom')):
-        output = r.output('brew', 'list', '--versions', '--' + kind)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        prefix_fut = pool.submit(r.output, 'brew', '--prefix')
+        formula_fut = pool.submit(r.output, 'brew', 'list', '--versions', '--formula')
+        cask_fut = pool.submit(r.output, 'brew', 'list', '--versions', '--cask')
+        prefix = prefix_fut.result()
+        outputs = (('formula', 'Cellar', formula_fut.result()),
+                   ('cask', 'Caskroom', cask_fut.result()))
+    for kind, directory, output in outputs:
         for line in output.splitlines():
             fields = line.split()
             if len(fields) < 2:
@@ -174,7 +202,7 @@ def _collect_mise(r, manager):
 def _collect_node(r, manager):
     """npm and pnpm share the same global list format."""
     data = r.data(manager, 'list', '-g', '--depth=0', '--json')
-    return js_packages(data, r.output(manager, 'root', '-g'))
+    return js_packages(data, lambda: r.output(manager, 'root', '-g'))
 
 
 def _collect_bun(r, manager):
@@ -241,21 +269,21 @@ def _collect_uv(r, manager):
     return records
 
 
-COLLECTORS = dict(brew=_collect_brew, mise=_collect_mise, npm=_collect_node, pnpm=_collect_node,
-                  bun=_collect_bun, pipx=_collect_pipx, uv=_collect_uv)
+COLLECTORS = {'brew': _collect_brew, 'mise': _collect_mise, 'npm': _collect_node, 'pnpm': _collect_node,
+              'bun': _collect_bun, 'pipx': _collect_pipx, 'uv': _collect_uv}
 
 
 def collect(runner, manager):
     """Failure is never an empty inventory. Shared by doctor and history."""
     if manager not in COLLECTORS:
-        return dict(status='error', packages=[], error='unsupported manager: ' + manager)
+        return {'status': 'error', 'packages': [], 'error': 'unsupported manager: ' + manager}
     if not runner.exists(manager):
-        return dict(status='absent', packages=[])
+        return {'status': 'absent', 'packages': []}
     try:
         records = COLLECTORS[manager](runner, manager)
-        return dict(status='ok', packages=records, executable=runner.exists(manager))
+        return {'status': 'ok', 'packages': records, 'executable': runner.exists(manager)}
     except (CheckError, KeyError, TypeError, AttributeError, ValueError) as exc:
-        return dict(status='error', packages=[], error=str(exc), executable=runner.exists(manager))
+        return {'status': 'error', 'packages': [], 'error': str(exc), 'executable': runner.exists(manager)}
 
 
 def state_path():
@@ -284,11 +312,21 @@ def snapshot(runner):
     except CheckError:
         environment_error = True
     # Disabled managers are snapshotted too: a mise runtime upgrade can still drop their packages.
-    result = {name: collect(runner, name) for name in MANAGERS}
-    if environment_error:
-        # An inventory under the wrong runtime cannot prove packages were retained.
-        for name in ('mise',) + GLOBAL_MANAGERS:
-            result[name] = dict(status='error', packages=[], error='environment unavailable')
+    # When environment resolution failed, mise and global managers cannot be trusted.
+    skipped = (('mise',) + GLOBAL_MANAGERS) if environment_error else ()
+    to_collect = [name for name in MANAGERS if name not in skipped]
+    collected = {}
+    if to_collect:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(to_collect)) as pool:
+            futures = {name: pool.submit(collect, runner, name) for name in to_collect}
+            for name, fut in futures.items():
+                collected[name] = fut.result()
+    result = {}
+    for name in MANAGERS:
+        if name in skipped:
+            result[name] = {'status': 'error', 'packages': [], 'error': 'environment unavailable'}
+        else:
+            result[name] = collected[name]
     # Do not retain raw diagnostics: package managers may echo registry credentials.
     for inventory in result.values():
         if inventory['status'] == 'error':
@@ -336,8 +374,8 @@ def receipt_lock(path):
 def history(action, report):
     path = state_path()
     if action == 'start':
-        data = dict(schema=1, run_id=report, started_at=now(), state='running',
-                    before={}, after={}, results={})
+        data = {'schema': 1, 'run_id': report, 'started_at': now(), 'state': 'running',
+                'before': {}, 'after': {}, 'results': {}}
         with receipt_lock(path):
             atomic_write(path, data)
         data['before'] = snapshot(Runner(offline=True))
@@ -400,7 +438,7 @@ def print_changes(changes, stream=None):
             detail = green + '+ ' + ', '.join(added) + nc
         else:
             detail = red + '− ' + ', '.join(removed) + nc
-        print('  {}{:<6}{} {:<28} {}'.format(dim, manager, nc, label, detail), file=stream)
+        print(f'  {dim}{manager:<6}{nc} {label:<28} {detail}', file=stream)
     print(rule, file=stream)
 
 
@@ -421,10 +459,17 @@ class Doctor:
         self.disabled = disabled_global_managers()
         self.commands = set(MANAGERS) | {'node', 'python', 'python3', 'softwareupdate'}
         self.shim_targets = {}
+        self._resolved_cache = {}
+        self._lock = threading.Lock()
+        self._local = threading.local()
 
     def emit(self, status, label, detail='', advice=''):
+        events = getattr(self._local, 'events', None)
+        if events is not None:
+            events.append(('emit', status, label, detail, advice))
+            return
         self.counts[status] += 1
-        print('[{}] {}'.format(status, clean(label)), flush=True)
+        print(f'[{status}] {clean(label)}', flush=True)
         if detail:
             lines = clean(detail).strip().splitlines()
             limit = len(lines) if self.r.verbose else 12
@@ -434,6 +479,23 @@ class Doctor:
                 print('  ... use --verbose for full details')
         if advice:
             print('  Next: ' + clean(advice))
+
+    def _replay(self, events):
+        for event in events:
+            if event[0] == 'raw':
+                print(event[1], flush=True)
+            else:
+                self.emit(*event[1:])
+
+    def _run_buffered(self, fn, *args):
+        events = []
+        self._local.events = events
+        try:
+            with self.r.capture_verbose(lambda line: events.append(('raw', line))):
+                fn(*args)
+        finally:
+            self._local.events = None
+        return events
 
     def check(self, label, args, output_status=None, failure='WARN', advice='', accepted=(0,), timeout=None):
         try:
@@ -450,7 +512,8 @@ class Doctor:
 
     def inventory(self, manager):
         inv = collect(self.r, manager)
-        self.inventories[manager] = inv
+        with self._lock:
+            self.inventories[manager] = inv
         if inv['status'] == 'absent':
             self.emit('SKIP', manager + ': not installed')
             return False
@@ -458,7 +521,7 @@ class Doctor:
             self.emit('ERROR', manager + ': inventory unavailable', inv['error'],
                       'Inspect the manager installation; retry update-all doctor --verbose.')
             return False
-        self.emit('OK', '{}: {} installed entries'.format(manager, len(inv['packages'])))
+        self.emit('OK', f"{manager}: {len(inv['packages'])} installed entries")
         self.inspect_packages(manager, inv['packages'])
         return True
 
@@ -479,13 +542,14 @@ class Doctor:
             data = json.loads(manifest.read_text())
             if data.get('version') != item['version']:
                 self.emit('ERROR', manager + ': installed version differs from inventory: ' + item['name'],
-                          '{} reports {}; manifest contains {}'.format(manager, item['version'], data.get('version')),
+                          f"{manager} reports {item['version']}; manifest contains {data.get('version')}",
                           'Review and reinstall this package with ' + manager + '.')
             bins = data.get('bin', {})
             if isinstance(bins, str):
                 bins = {item['name'].split('/')[-1]: bins}
             for name, target in bins.items():
-                self.commands.add(name)
+                with self._lock:
+                    self.commands.add(name)
                 target = Path(location) / target
                 if not target.is_file():
                     self.emit('ERROR', manager + ': missing executable ' + name, str(target),
@@ -499,7 +563,8 @@ class Doctor:
         for app in item.get('apps', []):
             target = Path(app)
             name = target.name + (item.get('suffix', '') if manager == 'pipx' else '')
-            self.commands.add(name)
+            with self._lock:
+                self.commands.add(name)
             if not target.is_file() or not os.access(target, os.X_OK):
                 self.emit('ERROR', manager + ': broken executable ' + name, str(target),
                           'Reinstall ' + item['name'] + ' with ' + manager + '.')
@@ -524,10 +589,13 @@ class Doctor:
         if not active:
             self.emit('WARN', manager + ': command is not on updater PATH: ' + name, str(target),
                       'Check the manager bin directory and shell PATH.')
-        elif self.resolved(active, name) != os.path.realpath(target) and \
-                not self.mise_npm_overrides_node(name, [self.resolved(active, name), os.path.realpath(target)]):
+            return
+        resolved_active = self.resolved(active, name)
+        resolved_target = os.path.realpath(target)
+        if resolved_active != resolved_target and \
+                not self.mise_npm_overrides_node(name, [resolved_active, resolved_target]):
             self.emit('INFO', manager + ': another installation provides ' + name,
-                      '{}; package executable: {}'.format(active, target),
+                      f'{active}; package executable: {target}',
                       'Review which installation should provide this command.')
 
     def mise_tool(self, path):
@@ -546,17 +614,29 @@ class Doctor:
     def resolved(self, path, name):
         if not path:
             return None
+        cache_key = (path, name)
+        with self._lock:
+            cached = self._resolved_cache.get(cache_key)
+        if cached is not None:
+            return cached
         # Resolve shims through mise without executing arbitrary user commands.
         if Path(path).parent == self.r.shim_dir:
-            if name not in self.shim_targets:
+            with self._lock:
+                target = self.shim_targets.get(name)
+            if target is None:
                 try:
-                    self.shim_targets[name] = os.path.realpath(self.r.output('mise', 'which', name))
+                    target = os.path.realpath(self.r.output('mise', 'which', name))
                 except CheckError:
                     self.emit('WARN', 'PATH: mise shim is not usable: ' + name, path,
                               'Review mise configuration and mise reshim; do not remove an active tool.')
-                    self.shim_targets[name] = os.path.realpath(path)
-            return self.shim_targets[name]
+                    target = os.path.realpath(path)
+                with self._lock:
+                    self.shim_targets[name] = target
+            with self._lock:
+                self._resolved_cache[cache_key] = target
+            return target
         # pnpm cmd-shim launchers are regular shell files, not symlinks.
+        result = None
         try:
             with open(path, 'rb') as stream:
                 content = stream.read(16384)
@@ -564,14 +644,19 @@ class Doctor:
                 text = content.decode(errors='replace')
                 match = re.search(r'^# cmd-shim-target=(/.*)$', text, re.MULTILINE)
                 if match:
-                    return os.path.realpath(match.group(1))
-                targets = re.findall(r'"\$basedir/([^"$]+)"', text)
-                targets = [p for p in targets if '/node_modules/' in p]
-                if targets:
-                    return os.path.realpath(Path(path).resolve().parent / targets[-1])
+                    result = os.path.realpath(match.group(1))
+                else:
+                    targets = re.findall(r'"\$basedir/([^"$]+)"', text)
+                    targets = [p for p in targets if '/node_modules/' in p]
+                    if targets:
+                        result = os.path.realpath(Path(path).resolve().parent / targets[-1])
         except OSError:
             pass
-        return os.path.realpath(path)
+        if result is None:
+            result = os.path.realpath(path)
+        with self._lock:
+            self._resolved_cache[cache_key] = result
+        return result
 
     def paths(self):
         for name in sorted(self.commands):
@@ -582,7 +667,7 @@ class Doctor:
                           'Add the manager bin directory to your shell PATH.')
             elif original and effective and self.resolved(original, name) != self.resolved(effective, name):
                 self.emit('WARN', 'PATH: shell and updater use different ' + name,
-                          'shell: {}\nupdater: {}'.format(original, effective),
+                          f'shell: {original}\nupdater: {effective}',
                           'Review PATH order and mise activation in your shell.')
             found = {}
             for directory in dict.fromkeys((self.original_path + ':' + self.r.env.get('PATH', '')).split(':')):
@@ -606,8 +691,10 @@ class Doctor:
                               'Review ownership; duplicate installations can be intentional.')
 
     # Remaining-update check per manager.
-    ONLINE = dict(brew='_online_brew', mise='_online_mise', npm='_online_node', pnpm='_online_node',
-                  bun='_online_bun', pipx='_online_pipx', uv='_online_uv')
+    ONLINE = types.MappingProxyType({
+        'brew': '_online_brew', 'mise': '_online_mise', 'npm': '_online_node', 'pnpm': '_online_node',
+        'bun': '_online_bun', 'pipx': '_online_pipx', 'uv': '_online_uv',
+    })
 
     def online(self, manager):
         if self.offline:
@@ -635,9 +722,10 @@ class Doctor:
             # update-all upgrades auto_updates casks only every few days
             # (UPDATE_ALL_CASKS_INTERVAL_DAYS); --force-intervals runs it now.
             run = 'Run update-all --force-intervals' if id(entry) in casks else 'Run update-all'
+            installed = entry.get('installed_versions', entry.get('installed', '?'))
+            current = entry.get('current_version', '?')
             self.emit('INFO' if pin else 'WARN', 'brew: ' + name + (' is pinned' if pin else ' has an update'),
-                      '{} -> {}'.format(entry.get('installed_versions', entry.get('installed', '?')),
-                                        entry.get('current_version', '?')),
+                      f'{installed} -> {current}',
                       '' if pin else run + ', or review brew upgrade --greedy-auto-updates ' + shlex.quote(name))
         if not entries:
             self.emit('OK', 'brew: no remaining updates')
@@ -646,7 +734,7 @@ class Doctor:
         data = self.r.data('mise', 'outdated', '--json')
         for name, item in data.items():
             self.emit('WARN', 'mise: update available for ' + name,
-                      '{} -> {} (requested: {})'.format(item.get('current'), item.get('latest'), item.get('requested')),
+                      f"{item.get('current')} -> {item.get('latest')} (requested: {item.get('requested')})",
                       'Run mise upgrade --yes (respects configured constraints).')
         if not data:
             self.emit('OK', 'mise: configured versions are up to date')
@@ -660,14 +748,14 @@ class Doctor:
         for name, item in data.items():
             delegated = manager == 'pnpm' and name in ('pnpm', '@pnpm/exe')
             self.emit('INFO' if delegated else 'WARN', manager + ': update available for ' + name,
-                      '{} -> {}'.format(item.get('current'), item.get('latest')),
+                      f"{item.get('current')} -> {item.get('latest')}",
                       'Managed separately by the pnpm self-update command; review its version tag.' if delegated else 'Run update-all.')
         if not data:
             self.emit('OK', manager + ': no remaining updates')
 
     def _online_bun(self, manager):
         with tempfile.TemporaryDirectory(prefix='update-all-bun-') as work:
-            out, err, code = self.r.run(['bun', 'outdated', '-g', '--no-save'], cwd=work)
+            out, err, _ = self.r.run(['bun', 'outdated', '-g', '--no-save'], cwd=work)
         rows = [line for line in out.splitlines() if re.search(r'[│|].*[│|]', line)
                 and not re.search(r'Package\s*[│|]', line)]
         if rows:
@@ -761,6 +849,44 @@ class Doctor:
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self.emit('WARN', 'Update history is unreadable', str(exc), 'Run update-all to create a new receipt.')
 
+    def _check_manager(self, manager):
+        if not self.inventory(manager):
+            return
+        if manager == 'brew':
+            self.check('Homebrew doctor', ['brew', 'doctor'], advice='Review the Homebrew recommendations.')
+            self.check('Homebrew dependencies', ['brew', 'missing'], failure='ERROR',
+                       advice='Review brew missing and reinstall affected packages.')
+            self.check('Homebrew cleanup candidates', ['brew', 'cleanup', '--dry-run'], output_status='INFO',
+                       advice='Review before running brew cleanup.')
+            self.check('Homebrew unused dependency candidates', ['brew', 'autoremove', '--dry-run'], output_status='INFO',
+                       advice='Review before running brew autoremove.')
+        elif manager == 'mise':
+            self.check('mise doctor', ['mise', 'doctor'], advice='Review mise doctor recommendations.')
+            self.check('mise missing configured tools', ['mise', 'ls', '--missing', '--no-header'], output_status='ERROR',
+                       advice='Review mise install.')
+            self.check('mise unused version candidates', ['mise', 'ls', '--prunable', '--no-header'], output_status='INFO',
+                       advice='Review mise prune --dry-run; other projects may still need these versions.')
+        if manager in self.disabled:
+            return
+        if not self.offline and manager in GLOBAL_MANAGERS and not self.inventories[manager]['packages']:
+            self.emit('INFO', manager + ': no global packages to check for updates')
+        else:
+            self.online(manager)
+
+    def _check_macos(self):
+        try:
+            out, err, _ = self.r.run(['softwareupdate', '-l'], timeout=300)
+            text = out + '\n' + err
+            if 'No new software available' in text:
+                self.emit('OK', 'macOS: up to date')
+            elif '* ' in text:
+                self.emit('INFO', 'macOS updates available', text,
+                          'Open System Settings > General > Software Update. update-all does not install these.')
+            else:
+                self.emit('WARN', 'macOS update result could not be interpreted', text)
+        except CheckError as exc:
+            self.emit('WARN', 'macOS update check incomplete', str(exc), 'Retry softwareupdate -l.')
+
     def run(self):
         print('Update all doctor', flush=True)
         try:
@@ -769,52 +895,29 @@ class Doctor:
             self.emit('WARN', 'Updater environment could not be fully resolved', str(exc),
                       'Review mise configuration; runtime-dependent checks may be incomplete.')
         if self.disabled:
+            selected = os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS', '')
             self.emit('INFO', 'Global package updates disabled: ' + ', '.join(self.disabled),
-                      'UPDATE_ALL_GLOBAL_MANAGERS="{}"; installations are still checked, '
-                      'remaining updates are not.'.format(os.environ.get('UPDATE_ALL_GLOBAL_MANAGERS', '')))
-        for manager in MANAGERS:
-            if not self.inventory(manager):
-                continue
-            if manager == 'brew':
-                self.check('Homebrew doctor', ['brew', 'doctor'], advice='Review the Homebrew recommendations.')
-                self.check('Homebrew dependencies', ['brew', 'missing'], failure='ERROR',
-                           advice='Review brew missing and reinstall affected packages.')
-                self.check('Homebrew cleanup candidates', ['brew', 'cleanup', '--dry-run'], output_status='INFO',
-                           advice='Review before running brew cleanup.')
-                self.check('Homebrew unused dependency candidates', ['brew', 'autoremove', '--dry-run'], output_status='INFO',
-                           advice='Review before running brew autoremove.')
-            elif manager == 'mise':
-                self.check('mise doctor', ['mise', 'doctor'], advice='Review mise doctor recommendations.')
-                self.check('mise missing configured tools', ['mise', 'ls', '--missing', '--no-header'], output_status='ERROR',
-                           advice='Review mise install.')
-                self.check('mise unused version candidates', ['mise', 'ls', '--prunable', '--no-header'], output_status='INFO',
-                           advice='Review mise prune --dry-run; other projects may still need these versions.')
-            if manager in self.disabled:
-                continue
-            if not self.offline and manager in GLOBAL_MANAGERS and not self.inventories[manager]['packages']:
-                self.emit('INFO', manager + ': no global packages to check for updates')
+                      f'UPDATE_ALL_GLOBAL_MANAGERS="{selected}"; installations are still checked, '
+                      'remaining updates are not.')
+        has_softwareupdate = bool(self.r.exists('softwareupdate'))
+        # Independent managers and softwareupdate run concurrently; each section's
+        # findings are buffered and emitted in deterministic order.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(MANAGERS) + 1) as pool:
+            manager_futures = {manager: pool.submit(self._run_buffered, self._check_manager, manager)
+                               for manager in MANAGERS}
+            macos_future = (pool.submit(self._run_buffered, self._check_macos)
+                            if has_softwareupdate and not self.offline else None)
+            for manager in MANAGERS:
+                self._replay(manager_futures[manager].result())
+            self.paths()
+            if not has_softwareupdate:
+                self.emit('SKIP', 'macOS Software Update: unavailable')
+            elif self.offline:
+                self.emit('SKIP', 'macOS updates (--offline)')
             else:
-                self.online(manager)
-        self.paths()
-        if not self.r.exists('softwareupdate'):
-            self.emit('SKIP', 'macOS Software Update: unavailable')
-        elif self.offline:
-            self.emit('SKIP', 'macOS updates (--offline)')
-        else:
-            try:
-                out, err, _ = self.r.run(['softwareupdate', '-l'], timeout=300)
-                text = out + '\n' + err
-                if 'No new software available' in text:
-                    self.emit('OK', 'macOS: up to date')
-                elif '* ' in text:
-                    self.emit('INFO', 'macOS updates available', text,
-                              'Open System Settings > General > Software Update. update-all does not install these.')
-                else:
-                    self.emit('WARN', 'macOS update result could not be interpreted', text)
-            except CheckError as exc:
-                self.emit('WARN', 'macOS update check incomplete', str(exc), 'Retry softwareupdate -l.')
+                self._replay(macos_future.result())
         self.receipt()
-        print('\nSummary: ' + ', '.join('{} {}'.format(self.counts[s], s) for s in ('OK', 'WARN', 'ERROR', 'INFO', 'SKIP')))
+        print('\nSummary: ' + ', '.join(f'{self.counts[s]} {s}' for s in ('OK', 'WARN', 'ERROR', 'INFO', 'SKIP')))
         print('No packages were installed, repaired or removed. INFO candidates require review.')
         return 1 if self.counts['WARN'] or self.counts['ERROR'] else 0
 

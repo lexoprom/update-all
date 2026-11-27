@@ -3,39 +3,7 @@ set -euo pipefail
 # Tests expect the default manager list regardless of the caller's setup.
 unset UPDATE_ALL_GLOBAL_MANAGERS
 
-strip_ansi() {
-  perl -pe 's/\e\[[0-9;]*[mK]//g'
-}
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null || fail "missing: $needle"
-}
-
-assert_not_contains() {
-  local haystack="$1"
-  local needle="$2"
-  if printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null; then
-    fail "unexpected: $needle"
-  fi
-}
-
-assert_equals() {
-  local actual="$1" expected="$2"
-  if [[ "$actual" != "$expected" ]]; then
-    echo "--- EXPECTED ---" >&2
-    printf '%s\n' "$expected" >&2
-    echo "--- ACTUAL ---" >&2
-    printf '%s\n' "$actual" >&2
-    fail "output mismatch"
-  fi
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers.sh"
 
 # Print the body line that immediately follows the "<header>:" line.
 # Lets tests pair a two-line section's header with its dim bullet body.
@@ -585,6 +553,24 @@ test_list_preserves_foreign_lock() {
   rm -f "$lock_file"
 }
 
+test_list_times_out_wedged_collector() {
+  local case_dir="$tmp/timeout"
+  local out="$tmp/timeout.out"
+  setup_case "$case_dir"
+  cat > "$case_dir/bin/uv" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+  chmod +x "$case_dir/bin/uv"
+  local rc=0
+  UPDATE_ALL_TOOL_TIMEOUT=1 run_list_rc "$case_dir" "$out" list || rc=$?
+  [[ $rc -eq 1 ]] || fail "expected exit status 1 on list timeout, got $rc"
+  local text
+  text="$(cat "$out")"
+  assert_equals "$(body_after "$text" "uv:")" "  ·  timed out"
+  assert_contains "$text" "·  @scope/pkg-a, typescript"
+}
+
 tmp="$(mktemp -d)"
 HOST_BASH="$(command -v bash)"
 cleanup() { rm -rf "$tmp"; }
@@ -611,5 +597,6 @@ test_pnpm_global_bin_on_path
 test_bun_lockfile_missing_is_none
 test_bun_missing_lockfile_message_is_none
 test_list_preserves_foreign_lock
+test_list_times_out_wedged_collector
 
 echo "PASS"

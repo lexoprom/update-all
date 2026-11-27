@@ -2,14 +2,14 @@
 """Exercise the actual Bash dispatcher with an isolated fake toolchain."""
 import json
 import os
-from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
-import signal
 import unittest
+from pathlib import Path
 
 # Tests expect the default manager list regardless of the caller's setup.
 os.environ.pop('UPDATE_ALL_GLOBAL_MANAGERS', None)
@@ -68,7 +68,7 @@ class CLITests(unittest.TestCase):
         self.receipt = self.root / 'state/update-all/last-run.json'
 
     def run_cli(self, *args):
-        return subprocess.run([str(self.script), *args], env=self.env, text=True,
+        return subprocess.run([str(self.script), *args], check=False, env=self.env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
 
     def calls(self):

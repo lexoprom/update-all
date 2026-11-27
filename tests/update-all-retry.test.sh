@@ -6,28 +6,8 @@ unset UPDATE_ALL_GLOBAL_MANAGERS
 # Tests for retry behavior of mise tool upgrades (transient aube/npm stream
 # errors) and for exit-code propagation when updates fail.
 
-strip_ansi() {
-  perl -pe 's/\e\[[0-9;]*[mK]//g'
-}
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null || fail "missing: $needle"
-}
-
-assert_not_contains() {
-  local haystack="$1"
-  local needle="$2"
-  if printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null; then
-    fail "unexpected: $needle"
-  fi
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers.sh"
+SCRIPT_BIN="update-all-retry-$$"
 
 make_fake_cmds() {
   local bindir="$1"
@@ -104,9 +84,9 @@ EOF
 setup_case() {
   local case_dir="$1"
   mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
-  cp ./update-all "$case_dir/update-all"
+  cp ./update-all "$case_dir/$SCRIPT_BIN"
   cp ./lib/*.sh ./lib/doctor.py "$case_dir/lib/"
-  chmod +x "$case_dir/update-all"
+  chmod +x "$case_dir/$SCRIPT_BIN"
   make_fake_cmds "$case_dir/bin"
 }
 
@@ -117,7 +97,7 @@ run_case() {
     UPDATE_ALL_RETRY_DELAY="${UPDATE_ALL_RETRY_DELAY:-0}" \
     UPDATE_ALL_TOOL_TIMEOUT="${UPDATE_ALL_TOOL_TIMEOUT:-0}" \
     PATH="$case_dir/bin:/usr/bin:/bin" \
-    env -u PNPM_HOME "$case_dir/update-all" "$@" 2>&1 | strip_ansi
+    env -u PNPM_HOME "$case_dir/$SCRIPT_BIN" "$@" 2>&1 | strip_ansi
 }
 
 test_mise_retry_recovers_from_transient_error() {

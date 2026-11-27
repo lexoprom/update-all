@@ -3,28 +3,8 @@ set -euo pipefail
 # Tests expect the default manager list regardless of the caller's setup.
 unset UPDATE_ALL_GLOBAL_MANAGERS UPDATE_ALL_COMMANDS_INTERVAL_DAYS UPDATE_ALL_CASKS_INTERVAL_DAYS UPDATE_ALL_BREW_CLEANUP_INTERVAL_DAYS
 
-strip_ansi() {
-  perl -pe 's/\e\[[0-9;]*[mK]//g'
-}
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null || fail "missing: $needle"
-}
-
-assert_not_contains() {
-  local haystack="$1"
-  local needle="$2"
-  if printf '%s\n' "$haystack" | grep -F -- "$needle" >/dev/null; then
-    fail "unexpected: $needle"
-  fi
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers.sh"
+SCRIPT_BIN="update-all-commands-$$"
 
 make_fake_cmds() {
   local bindir="$1"
@@ -130,16 +110,16 @@ EOF
 setup_case() {
   local case_dir="$1"
   mkdir -p "$case_dir/bin" "$case_dir/home" "$case_dir/lib"
-  cp ./update-all "$case_dir/update-all"
+  cp ./update-all "$case_dir/$SCRIPT_BIN"
   cp ./lib/*.sh ./lib/doctor.py "$case_dir/lib/"
-  chmod +x "$case_dir/update-all"
+  chmod +x "$case_dir/$SCRIPT_BIN"
   make_fake_cmds "$case_dir/bin"
 }
 
 run_case() {
   local case_dir="$1"
   shift
-  HOME="$case_dir/home" XDG_STATE_HOME="$case_dir/home/.local/state" PATH="$case_dir/bin:/usr/bin:/bin" "$case_dir/update-all" "$@" 2>&1 | strip_ansi
+  HOME="$case_dir/home" XDG_STATE_HOME="$case_dir/home/.local/state" PATH="$case_dir/bin:/usr/bin:/bin" "$case_dir/$SCRIPT_BIN" "$@" 2>&1 | strip_ansi
 }
 
 test_default_commands_file_runs_last() {
@@ -407,7 +387,7 @@ test_live_lock_blocks_second_run() {
   # cannot collide with a real updater or a parallel test.
   local name="update-all-locktest-$$" holder out rc=0
   local lock_file="/tmp/.${name}_lock"
-  cp "$case_dir/update-all" "$case_dir/$name"
+  cp "$case_dir/$SCRIPT_BIN" "$case_dir/$name"
   sleep 30 &
   holder=$!
   printf '%s\n' "$holder" > "$lock_file"
@@ -419,6 +399,20 @@ test_live_lock_blocks_second_run() {
   wait "$holder" 2>/dev/null || true
   [[ $rc -ne 0 ]] || fail "second run should fail while the lock is held"
   assert_contains "$out" "Another instance is already running (PID: $holder)"
+}
+
+test_dry_run_skips_npm_snapshot() {
+  local case_dir="$tmp/dry-no-npm-snap"
+  setup_case "$case_dir"
+  cat > "$case_dir/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+echo "npm $*" >> "$(dirname "$0")/npm-calls"
+exit 0
+EOF
+  chmod +x "$case_dir/bin/npm"
+
+  run_case "$case_dir" --dry-run --skip-commands >/dev/null
+  [[ ! -s "$case_dir/bin/npm-calls" ]] || fail "dry-run invoked npm: $(cat "$case_dir/bin/npm-calls")"
 }
 
 trap cleanup EXIT
@@ -441,5 +435,6 @@ test_commands_interval_rejects_invalid_value
 test_global_managers_subset_label
 test_tool_timeout_rejects_invalid_value
 test_live_lock_blocks_second_run
+test_dry_run_skips_npm_snapshot
 
 echo "PASS"

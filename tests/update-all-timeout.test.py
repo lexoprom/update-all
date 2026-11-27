@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
@@ -7,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 # Tests expect the default manager list regardless of the caller's setup.
 os.environ.pop('UPDATE_ALL_GLOBAL_MANAGERS', None)

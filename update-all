@@ -15,6 +15,7 @@ find_modern_bash() {
 
     for candidate in "${candidates[@]}"; do
         [[ -x "$candidate" ]] || continue
+        # shellcheck disable=SC2016
         "$candidate" -c 'exit $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 ? 0 : 1 ))' >/dev/null 2>&1 || continue
         printf '%s\n' "$candidate"
         return 0
@@ -52,6 +53,7 @@ LOCK_FILE="/tmp/.${SCRIPT_NAME}_lock"
 LOCK_ACQUIRED=false
 LOCK_TMP_FILE=""
 REPORT_DIR=""
+LIST_TMP_DIR=""
 SKIP_COMMANDS=false
 COMMANDS_FILE=""
 LIST_VERSIONS=false
@@ -139,6 +141,9 @@ cleanup() {
     fi
     if [[ -n "${REPORT_DIR:-}" && -d "$REPORT_DIR" ]]; then
         rm -rf "$REPORT_DIR"
+    fi
+    if [[ -n "${LIST_TMP_DIR:-}" && -d "$LIST_TMP_DIR" ]]; then
+        rm -rf "$LIST_TMP_DIR"
     fi
     if [[ $exit_code -ne 0 && $exit_code -ne 130 && "$LIST_MODE" != true ]]; then
         echo -e "\n${RED}Script aborted (exit code: $exit_code)${NC}"
@@ -376,7 +381,7 @@ acquire_lock() {
 # still in /Applications, so move the stale copy to the Trash and retry once.
 # Usage: brew_upgrade_recovering [brew upgrade args...]
 brew_upgrade_recovering() {
-    local output rc=0 caskroom path recovered=false
+    local output rc=0 caskroom path recovered=false n=0
     output=$(brew upgrade "$@" 2>&1) || rc=$?
     printf '%s\n' "$output"
     (( rc == 0 )) && return 0
@@ -385,7 +390,8 @@ brew_upgrade_recovering() {
         [[ "$path" == "$caskroom"/*/*/*.app && -d "$path" ]] || continue
         echo "Moving stale cask app to Trash and retrying: $path"
         mkdir -p "$HOME/.Trash"
-        mv -- "$path" "$HOME/.Trash/$(basename "$path" .app)-stale-$(date +%s).app" && recovered=true
+        n=$((n + 1))
+        mv -- "$path" "$HOME/.Trash/$(basename "$path" .app)-stale-$(date +%s)-$$-$n.app" && recovered=true
     done < <(printf '%s\n' "$output" | sed -n "s/.*It seems there is already an App at '\(.*\)'\..*/\1/p")
     [[ "$recovered" == true ]] || return "$rc"
     brew upgrade "$@"
@@ -478,6 +484,7 @@ commands_interval_is_fresh() {
 }
 
 update_global_packages() {
+    # shellcheck disable=SC2034
     declare -A result=()
     global_packages_run result "$REPORT_DIR" "$DRY_RUN" log_status "${GLOBAL_MANAGERS_SELECTED[@]}"
 }
@@ -627,6 +634,7 @@ macos_check_current_build() {
 # Prints "<epoch> <result>" for a well-formed state file recorded on the
 # current macOS build; fails otherwise.
 macos_check_read_state() {
+    # shellcheck disable=SC2034
     local epoch="" outcome="" build="" extra=""
     interval_read_state macos-check epoch outcome build extra || return 1
     interval_epoch_within "$epoch" "$MACOS_CHECK_INTERVAL_DAYS" || return 1
@@ -699,10 +707,9 @@ mise_tool_components() { printf '%s\n' "mise tool upgrades" "mise reshim"; }
 
 # "Updating global packages (Bun, npm, …)" for the selected managers.
 global_packages_tool_label() {
-    local -A names=([bun]=Bun [npm]=npm [pnpm]=pnpm [pipx]=Pipx [uv]=uv)
     local pm list=""
-    for pm in bun npm pnpm pipx uv; do
-        global_managers_selected "$pm" && list+="${list:+, }${names[$pm]}"
+    for pm in "${GLOBAL_PACKAGES_DISPLAY_ORDER[@]}"; do
+        global_managers_selected "$pm" && list+="${list:+, }${GLOBAL_PACKAGES_DISPLAY_NAMES[$pm]}"
     done
     printf 'Updating global packages%s\n' "${list:+ ($list)}"
 }
@@ -738,7 +745,8 @@ configure_tool_runner() {
     tool_runner_define_phase "casks" "serial"
     # mise runs after Homebrew, which may upgrade the mise binary itself.
     tool_runner_define_phase "runtimes" "serial"
-    tool_runner_define_phase "phase2" "parallel" "Waiting for package updates…"
+    # global_packages parallelizes its managers internally.
+    tool_runner_define_phase "phase2" "serial"
     tool_runner_define_phase "post" "serial"
 
     tool_runner_register "homebrew" "phase1" "Updating Homebrew" \
@@ -758,7 +766,7 @@ configure_tool_runner() {
 # --- SHARED ENVIRONMENT ---
 
 setup_environment() {
-    cd "$HOME"
+    cd "$HOME" || { echo "Error: Could not change directory to $HOME" >&2; return 1; }
     export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
     export PATH="$HOME/.bun/bin:$HOME/.local/share/mise/shims:$PATH:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
     if [[ "${1:-}" != doctor ]] && command_exists mise; then eval "$(mise activate bash)"; fi
@@ -865,11 +873,12 @@ list_node_tree_line() {
 
 list_bun_line() {
     list_require Bun bun || return 0
-    local workdir errfile out err rc=0
+    local base_dir="${LIST_TMP_DIR:-/tmp}" workdir errfile out err rc=0
+    [[ -d "$base_dir" ]] || base_dir="/tmp"
     # Mirror the Bun updater: list globals from a fresh temp directory so a
     # local lockfile/project context cannot break or pollute the inventory.
-    workdir="$(mktemp -d "/tmp/update-all-list-bun.XXXXXX")"
-    errfile="$(mktemp "/tmp/update-all-list-bun.err.XXXXXX")"
+    workdir="$(mktemp -d "$base_dir/update-all-list-bun.XXXXXX")"
+    errfile="$(mktemp "$base_dir/update-all-list-bun.err.XXXXXX")"
     out="$(cd "$workdir" && bun pm ls -g 2>"$errfile")" || rc=$?
     err="$(<"$errfile")"
     rm -rf "$workdir" "$errfile"
@@ -911,19 +920,55 @@ list_custom_commands_lines() {
     done
 }
 
+_run_list_slot() {
+    local slot="$1" label="$2"
+    shift 2
+    local out_file="$LIST_TMP_DIR/$slot.out"
+    local rc_file="$LIST_TMP_DIR/$slot.rc"
+    local rc=0
+    run_with_timeout "$TOOL_TIMEOUT_SECONDS" "$@" > "$out_file" || rc=$?
+    if [[ $rc -eq 124 && ! -s "$out_file" ]]; then
+        list_emit "$label" "timed out" > "$out_file"
+    fi
+    printf '%s\n' "$rc" > "$rc_file"
+}
+
 run_list() {
     local failures=0
+    LIST_TMP_DIR="$(mktemp -d "/tmp/${SCRIPT_NAME}_list.XXXXXX")"
+    local -a slots=() pids=()
+
     if [[ "$LIST_SKIP_BREW" != true ]]; then
-        list_homebrew_line || failures=1
+        _run_list_slot brew Homebrew list_homebrew_line &
+        slots+=(brew); pids+=("$!")
     fi
-    list_macos_line
-    list_mise_line || failures=1
-    list_pipx_line || failures=1
-    list_node_tree_line npm || failures=1
-    list_node_tree_line pnpm || failures=1
-    list_bun_line || failures=1
-    list_uv_line || failures=1
+    _run_list_slot mise mise list_mise_line &
+    slots+=(mise); pids+=("$!")
+    _run_list_slot pipx pipx list_pipx_line &
+    slots+=(pipx); pids+=("$!")
+    _run_list_slot npm npm list_node_tree_line npm &
+    slots+=(npm); pids+=("$!")
+    _run_list_slot pnpm pnpm list_node_tree_line pnpm &
+    slots+=(pnpm); pids+=("$!")
+    _run_list_slot bun Bun list_bun_line &
+    slots+=(bun); pids+=("$!")
+    _run_list_slot uv uv list_uv_line &
+    slots+=(uv); pids+=("$!")
+
+    local i slot rc
+    for (( i = 0; i < ${#slots[@]}; i++ )); do
+        slot="${slots[$i]}"
+        wait "${pids[$i]}" || true
+        if [[ "$slot" == mise ]]; then
+            list_macos_line
+        fi
+        [[ -f "$LIST_TMP_DIR/$slot.out" ]] && cat "$LIST_TMP_DIR/$slot.out"
+        rc="$(cat "$LIST_TMP_DIR/$slot.rc" 2>/dev/null || echo 1)"
+        [[ "$rc" -eq 0 ]] || failures=1
+    done
     list_custom_commands_lines
+    rm -rf "$LIST_TMP_DIR"
+    LIST_TMP_DIR=""
     return $failures
 }
 
@@ -960,7 +1005,8 @@ EOF
         esac
         shift
     done
-    setup_environment
+    validate_tool_timeout || exit 1
+    setup_environment || exit 1
     run_list
 }
 
@@ -999,7 +1045,7 @@ EOF
     resolve_global_managers || return 2
     export UPDATE_ALL_ORIGINAL_PATH="$PATH"
     doctor_python="$(find_python || true)"
-    setup_environment doctor
+    setup_environment doctor || return 2
     if [[ -z "$doctor_python" ]]; then
         echo "Doctor requires Python 3. Install Python 3 and retry." >&2
         return 2
@@ -1129,10 +1175,10 @@ EOF
         echo "Failed to create report directory. Exiting." >&2
         exit 1
     fi
-    setup_environment
+    setup_environment || exit 1
 
     history_start
-    if global_managers_selected npm; then
+    if [[ "$DRY_RUN" != true ]] && global_managers_selected npm; then
         global_packages_snapshot "$REPORT_DIR"
     fi
     configure_tool_runner

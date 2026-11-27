@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 
 # shellcheck source=./common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -93,8 +94,8 @@ custom_commands_run() {
         _custom_commands_emit_status "$status_sink" "custom commands" "❌ Failed ($failures of $i)"
     fi
 
-    _result[count]="$i"
-    _result[failures]="$failures"
-    _result[index_file]="$idxfile"
+    _result["count"]="$i"
+    _result["failures"]="$failures"
+    _result["index_file"]="$idxfile"
     [[ $failures -eq 0 ]]
 }
